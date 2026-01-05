@@ -18,10 +18,11 @@ ARQUIVO_DADOS = "backup_vendas.csv"
 # INICIALIZAÇÃO DO ARQUIVO
 # =============================
 if os.path.exists(ARQUIVO_DADOS):
-    df = pd.read_csv(ARQUIVO_DADOS)
+    df = pd.read_csv(ARQUIVO_DADOS, dtype={"CPF": str})
 else:
     df = pd.DataFrame(columns=[
         "Cliente",
+        "CPF",
         "Modelo",
         "Valor_Venda",
         "Percentual_Cashback",
@@ -87,6 +88,7 @@ elif menu == "➕ Nova Venda":
 
         with col1:
             cliente = st.text_input("Nome do Cliente *")
+            cpf = st.text_input("CPF *", help="Somente números")
             modelo = st.selectbox(
                 "Modelo do Carro *",
                 ["Onix", "Onix Plus", "Tracker", "Spin", "Montana", "S10", "Blazer"]
@@ -110,9 +112,10 @@ elif menu == "➕ Nova Venda":
         salvar = st.form_submit_button("Salvar Venda")
 
         if salvar:
-            if cliente and valor_venda > 0:
+            if cliente and cpf and valor_venda > 0:
                 nova_venda = {
                     "Cliente": cliente,
+                    "CPF": cpf,
                     "Modelo": modelo,
                     "Valor_Venda": valor_venda,
                     "Percentual_Cashback": percentual,
@@ -123,7 +126,7 @@ elif menu == "➕ Nova Venda":
                 df.to_csv(ARQUIVO_DADOS, index=False)
                 st.success("Venda registrada com sucesso!")
             else:
-                st.error("Preencha todos os campos obrigatórios.")
+                st.error("Preencha todos os campos obrigatórios (*)")
 
 # =============================
 # BUSCAR CLIENTE
@@ -131,10 +134,13 @@ elif menu == "➕ Nova Venda":
 elif menu == "🔍 Buscar Cliente":
     st.header("🔍 Buscar Cliente")
 
-    busca = st.text_input("Digite o nome do cliente")
+    busca = st.text_input("Digite o nome ou CPF")
 
     if busca:
-        resultado = df[df["Cliente"].str.contains(busca, case=False, na=False)]
+        resultado = df[
+            df["Cliente"].str.contains(busca, case=False, na=False) |
+            df["CPF"].str.contains(busca, case=False, na=False)
+        ]
     else:
         resultado = df
 
