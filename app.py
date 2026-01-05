@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 import os
+from io import BytesIO
 
 # =============================
 # CONFIGURAÇÃO DA PÁGINA
@@ -15,15 +16,15 @@ st.set_page_config(
 ARQUIVO_DADOS = "backup_vendas.csv"
 
 # =============================
-# INICIALIZAÇÃO DO ARQUIVO
+# INICIALIZAÇÃO DOS DADOS
 # =============================
 if os.path.exists(ARQUIVO_DADOS):
     df = pd.read_csv(ARQUIVO_DADOS, dtype={"CPF": str})
 else:
     df = pd.DataFrame(columns=[
-        "Cliente",
+        "Nome",
         "CPF",
-        "Modelo",
+        "Veiculo",
         "Valor_Venda",
         "Percentual_Cashback",
         "Valor_Cashback",
@@ -38,14 +39,14 @@ st.title("🚗 Sistema de Vendas - Auto Nunes")
 st.markdown("---")
 
 # =============================
-# SIDEBAR
+# MENU LATERAL
 # =============================
 st.sidebar.title("📌 Menu")
 
 menu = st.sidebar.radio(
     "Selecione:",
     [
-        "📊 Dashboard",
+        "📊 Dashboard de Vendas",
         "➕ Nova Venda",
         "🔍 Buscar Cliente",
         "📄 Relatórios"
@@ -55,7 +56,7 @@ menu = st.sidebar.radio(
 # =============================
 # DASHBOARD
 # =============================
-if menu == "📊 Dashboard":
+if menu == "📊 Dashboard de Vendas":
     st.header("📊 Dashboard de Vendas")
 
     total_vendas = len(df)
@@ -68,14 +69,14 @@ if menu == "📊 Dashboard":
     c3.metric("Cashback Concedido", f"R$ {cashback_total:,.2f}")
 
     st.markdown("---")
-    st.subheader("🚗 Carros Vendidos por Modelo")
+    st.subheader("🚗 Quantidade de Carros Vendidos")
 
     if not df.empty:
-        carros = df.groupby("Modelo").size().reset_index(name="Quantidade")
-        st.bar_chart(carros.set_index("Modelo"))
+        carros = df.groupby("Veiculo").size().reset_index(name="Quantidade")
+        st.bar_chart(carros.set_index("Veiculo"))
         st.dataframe(carros, use_container_width=True)
     else:
-        st.info("Nenhuma venda registrada.")
+        st.info("Nenhuma venda registrada até o momento.")
 
 # =============================
 # NOVA VENDA
@@ -87,10 +88,10 @@ elif menu == "➕ Nova Venda":
         col1, col2 = st.columns(2)
 
         with col1:
-            cliente = st.text_input("Nome do Cliente *")
-            cpf = st.text_input("CPF *", help="Somente números")
-            modelo = st.selectbox(
-                "Modelo do Carro *",
+            nome = st.text_input("Nome do Cliente *")
+            cpf = st.text_input("CPF *")
+            veiculo = st.selectbox(
+                "Veículo *",
                 ["Onix", "Onix Plus", "Tracker", "Spin", "Montana", "S10", "Blazer"]
             )
             data_venda = st.date_input("Data da Venda", value=date.today())
@@ -104,26 +105,28 @@ elif menu == "➕ Nova Venda":
         valor_cashback = valor_venda * (percentual / 100)
 
         st.markdown("### 📋 Resumo")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Valor Venda", f"R$ {valor_venda:,.2f}")
-        c2.metric("Cashback", f"R$ {valor_cashback:,.2f}")
-        c3.metric("Percentual", f"{percentual}%")
+        r1, r2, r3 = st.columns(3)
+        r1.metric("Valor da Venda", f"R$ {valor_venda:,.2f}")
+        r2.metric("Cashback", f"R$ {valor_cashback:,.2f}")
+        r3.metric("Percentual", f"{percentual}%")
 
         salvar = st.form_submit_button("Salvar Venda")
 
         if salvar:
-            if cliente and cpf and valor_venda > 0:
+            if nome and cpf and valor_venda > 0:
                 nova_venda = {
-                    "Cliente": cliente,
+                    "Nome": nome,
                     "CPF": cpf,
-                    "Modelo": modelo,
+                    "Veiculo": veiculo,
                     "Valor_Venda": valor_venda,
                     "Percentual_Cashback": percentual,
                     "Valor_Cashback": valor_cashback,
                     "Data_Venda": data_venda
                 }
+
                 df = pd.concat([df, pd.DataFrame([nova_venda])], ignore_index=True)
                 df.to_csv(ARQUIVO_DADOS, index=False)
+
                 st.success("Venda registrada com sucesso!")
             else:
                 st.error("Preencha todos os campos obrigatórios (*)")
@@ -134,11 +137,11 @@ elif menu == "➕ Nova Venda":
 elif menu == "🔍 Buscar Cliente":
     st.header("🔍 Buscar Cliente")
 
-    busca = st.text_input("Digite o nome ou CPF")
+    busca = st.text_input("Digite o nome ou CPF do cliente")
 
     if busca:
         resultado = df[
-            df["Cliente"].str.contains(busca, case=False, na=False) |
+            df["Nome"].str.contains(busca, case=False, na=False) |
             df["CPF"].str.contains(busca, case=False, na=False)
         ]
     else:
@@ -147,27 +150,41 @@ elif menu == "🔍 Buscar Cliente":
     st.dataframe(resultado, use_container_width=True)
 
 # =============================
-# RELATÓRIOS
+# RELATÓRIOS (EXCEL)
 # =============================
 elif menu == "📄 Relatórios":
     st.header("📄 Relatórios")
 
-    st.subheader("🚗 Quantidade de Carros Vendidos")
+    st.subheader("📊 Vendas Organizadas")
 
-    relatorio = df.groupby("Modelo").size().reset_index(name="Quantidade")
+    relatorio = df[[
+        "Nome",
+        "CPF",
+        "Veiculo",
+        "Valor_Venda",
+        "Percentual_Cashback",
+        "Valor_Cashback",
+        "Data_Venda"
+    ]]
+
     st.dataframe(relatorio, use_container_width=True)
 
-    csv = df.to_csv(index=False).encode("utf-8")
+    # Gerar Excel em memória
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        relatorio.to_excel(writer, index=False, sheet_name="Vendas")
 
     st.download_button(
-        "⬇ Baixar relatório (CSV)",
-        csv,
-        file_name="relatorio_vendas.csv",
-        mime="text/csv"
+        "⬇ Baixar Relatório em Excel",
+        buffer.getvalue(),
+        file_name="relatorio_vendas.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
 # =============================
 # RODAPÉ
 # =============================
 st.markdown("---")
-st.caption("Auto Nunes © Sistema de Cashback")
+st.caption(
+    "Sistema desenvolvido por Carlos Jr - Supervisor BDC"
+)
