@@ -1,0 +1,3 @@
+cd "C:\Users\BDC\Documents\CARLOS PYTHON\excel"
+echo streamlit==1.29.0 > requirements-streamlit.txt
+echo pandas==2.1.3 >> requirements-streamlit.txt
