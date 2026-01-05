@@ -13,7 +13,10 @@ st.set_page_config(
     layout="wide"
 )
 
-ARQUIVO_DADOS = "backup_vendas.csv"
+# =============================
+# ARQUIVO LOCAL DE BACKUP
+# =============================
+ARQUIVO_DADOS = "backup-vendas-auto.csv"  # CSV local
 
 # =============================
 # INICIALIZAÇÃO DOS DADOS
@@ -42,7 +45,6 @@ st.markdown("---")
 # MENU LATERAL
 # =============================
 st.sidebar.title("📌 Menu")
-
 menu = st.sidebar.radio(
     "Selecione:",
     [
@@ -129,7 +131,6 @@ elif menu == "➕ Nova Venda":
 
                 # Salva backup local
                 df.to_csv(ARQUIVO_DADOS, index=False)
-
                 st.success("Venda registrada com sucesso!")
 
                 # =============================
@@ -141,15 +142,15 @@ elif menu == "➕ Nova Venda":
 
                     # Token do Secrets
                     TOKEN = st.secrets["GITHUB_TOKEN"]
-                    REPO = "carlosmuller1990-droid/backup-vendas-auto"  # SEU USUÁRIO + NOME DO REPO
-                    ARQUIVO = ARQUIVO_DADOS
+                    REPO = "carlosmuller1990-droid/cashback"  # Repositório do app
+                    ARQUIVO_GITHUB = ARQUIVO_DADOS      # Nome do arquivo dentro do repo
 
                     # Conecta ao GitHub
                     g = Github(TOKEN)
                     repo = g.get_repo(REPO)
 
                     # Lê CSV local
-                    with open(ARQUIVO, "rb") as f:
+                    with open(ARQUIVO_DADOS, "rb") as f:
                         conteudo = f.read()
 
                     # Converte para base64
@@ -157,10 +158,10 @@ elif menu == "➕ Nova Venda":
 
                     # Cria ou atualiza arquivo no GitHub
                     try:
-                        arquivo_github = repo.get_contents(ARQUIVO)
-                        repo.update_file(ARQUIVO, "Atualizando backup", conteudo_base64, arquivo_github.sha)
+                        arquivo_github = repo.get_contents(ARQUIVO_GITHUB)
+                        repo.update_file(ARQUIVO_GITHUB, "Atualizando backup", conteudo_base64, arquivo_github.sha)
                     except:
-                        repo.create_file(ARQUIVO, "Criando backup inicial", conteudo_base64)
+                        repo.create_file(ARQUIVO_GITHUB, "Criando backup inicial", conteudo_base64)
 
                     st.info("Backup enviado para o GitHub com sucesso!")
 
