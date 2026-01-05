@@ -139,9 +139,9 @@ elif menu == "➕ Nova Venda":
                     from github import Github
                     import base64
 
-                    # Pega token do Secrets
+                    # Token do Secrets
                     TOKEN = st.secrets["GITHUB_TOKEN"]
-                    REPO = "usuario/backup-vendas-auto"  # Substitua pelo seu repositório
+                    REPO = "carlosmuller1990-droid/backup-vendas-auto"  # SEU USUÁRIO + NOME DO REPO
                     ARQUIVO = ARQUIVO_DADOS
 
                     # Conecta ao GitHub
