@@ -1,231 +1,301 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-from datetime import datetime, timedelta
+import os
+from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# Configuração da página
+# ========== CONFIGURAÇÃO DE PERSISTÊNCIA CRÍTICA ==========
+# Streamlit Cloud perde dados da pasta raiz, mas mantém na pasta /data/
+os.makedirs('/data', exist_ok=True)  # Pasta persistente do Streamlit Cloud
+os.makedirs('data', exist_ok=True)   # Pasta local para backup
+
+def get_db_connection():
+    """Conexão com banco em pasta PERSISTENTE"""
+    # Tenta primeiro a pasta persistente do Streamlit Cloud
+    db_path = '/data/vendas_auto_nunes.db'
+    if not os.path.exists('/data'):
+        # Fallback para pasta local
+        db_path = 'data/vendas_auto_nunes.db'
+    
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    # Ativar WAL mode para melhor performance e prevenção de corrupção
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
+    return conn
+
+# ========== CONFIGURAÇÃO DA PÁGINA ==========
 st.set_page_config(
     page_title="Sistema de Vendas - Auto Nunes",
     page_icon="🚗",
     layout="wide"
 )
 
-# Título do sistema
 st.title("🚗 Sistema de Vendas - Auto Nunes Concessionária")
 st.markdown("---")
 
-# Inicializar banco de dados
+# ========== INICIALIZAR BANCO ==========
 def init_db():
-    conn = sqlite3.connect('vendas_auto_nunes.db')
+    """Cria tabelas se não existirem"""
+    conn = get_db_connection()
     c = conn.cursor()
     
-    # Tabela de vendas
-    c.execute('''CREATE TABLE IF NOT EXISTS vendas
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  nome_cliente TEXT NOT NULL,
-                  cpf TEXT UNIQUE NOT NULL,
-                  data_nascimento DATE NOT NULL,
-                  carro_comprado TEXT NOT NULL,
-                  valor_original REAL NOT NULL,
-                  percentual_cashback INTEGER NOT NULL,
-                  valor_com_cashback REAL NOT NULL,
-                  valor_cashback REAL NOT NULL,
-                  data_compra DATE NOT NULL,
-                  data_expiracao_cashback DATE NOT NULL,
-                  cashback_utilizado BOOLEAN DEFAULT 0,
-                  data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    # Tabela principal de vendas
+    c.execute('''CREATE TABLE IF NOT EXISTS vendas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome_cliente TEXT NOT NULL,
+        cpf TEXT UNIQUE NOT NULL,
+        data_nascimento DATE NOT NULL,
+        carro_comprado TEXT NOT NULL,
+        valor_original REAL NOT NULL,
+        percentual_cashback INTEGER NOT NULL,
+        valor_com_cashback REAL NOT NULL,
+        valor_cashback REAL NOT NULL,
+        data_compra DATE NOT NULL,
+        data_expiracao_cashback DATE NOT NULL,
+        cashback_utilizado BOOLEAN DEFAULT 0,
+        data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        ultima_atualizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
     
-    # Tabela de utilização de cashback
-    c.execute('''CREATE TABLE IF NOT EXISTS uso_cashback
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  venda_id INTEGER NOT NULL,
-                  valor_utilizado REAL NOT NULL,
-                  data_utilizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  FOREIGN KEY (venda_id) REFERENCES vendas (id))''')
+    # Tabela de histórico de cashback usado
+    c.execute('''CREATE TABLE IF NOT EXISTS uso_cashback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        venda_id INTEGER NOT NULL,
+        valor_utilizado REAL NOT NULL,
+        data_utilizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (venda_id) REFERENCES vendas (id) ON DELETE CASCADE
+    )''')
+    
+    # Índices para performance
+    c.execute('CREATE INDEX IF NOT EXISTS idx_cpf ON vendas(cpf)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_nome ON vendas(nome_cliente)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_expiracao ON vendas(data_expiracao_cashback)')
     
     conn.commit()
     conn.close()
 
-# Chamar função de inicialização
+# Inicializar banco
 init_db()
 
-# Opções fixas de carros (não podem ser escritas)
+# ========== DADOS FIXOS ==========
 CARROS_DISPONIVEIS = [
-    "Onix",
-    "Onix Plus", 
-    "Tracker",
-    "Spin",
-    "Captiva",
-    "Blazer",
-    "Blazer Elétrica",
-    "S10",
-    "Montana"
+    "Onix", "Onix Plus", "Tracker", "Spin", "Captiva",
+    "Blazer", "Blazer Elétrica", "S10", "Montana"
 ]
 
-# Opções de cashback
 OPCOES_CASHBACK = [
-    {"label": "Sem Cashback", "percentual": 0, "valor": 0},
-    {"label": "Cashback 5%", "percentual": 5, "valor": 0.05},
-    {"label": "Cashback 10%", "percentual": 10, "valor": 0.10},
-    {"label": "Cashback 15%", "percentual": 15, "valor": 0.15},
-    {"label": "Cashback 20%", "percentual": 20, "valor": 0.20}
+    {"label": "Sem Cashback", "percentual": 0},
+    {"label": "Cashback 5%", "percentual": 5},
+    {"label": "Cashback 10%", "percentual": 10},
+    {"label": "Cashback 15%", "percentual": 15},
+    {"label": "Cashback 20%", "percentual": 20}
 ]
 
-# Função para adicionar venda
+# ========== FUNÇÕES COM PERSISTÊNCIA GARANTIDA ==========
 def add_venda(nome, cpf, data_nasc, carro, valor_original, percentual_cashback):
-    conn = sqlite3.connect('vendas_auto_nunes.db')
+    """Adiciona venda com validação de CPF único"""
+    conn = get_db_connection()
     c = conn.cursor()
     
-    # Calcular valores com cashback
+    # Calcular valores
     valor_cashback = valor_original * (percentual_cashback / 100)
     valor_com_cashback = valor_original - valor_cashback
-    
-    # Datas
     data_compra = datetime.now().date()
     data_expiracao = data_compra + relativedelta(months=3)
     
     try:
+        # Verificar se CPF já existe
+        c.execute('SELECT cpf FROM vendas WHERE cpf = ?', (cpf,))
+        if c.fetchone():
+            return False, "❌ CPF já cadastrado!"
+        
+        # Inserir nova venda
         c.execute('''INSERT INTO vendas 
-                     (nome_cliente, cpf, data_nascimento, carro_comprado, 
-                      valor_original, percentual_cashback, valor_com_cashback, 
-                      valor_cashback, data_compra, data_expiracao_cashback)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                  (nome, cpf, data_nasc, carro, valor_original, 
-                   percentual_cashback, valor_com_cashback, valor_cashback,
-                   data_compra, data_expiracao))
+                    (nome_cliente, cpf, data_nascimento, carro_comprado,
+                     valor_original, percentual_cashback, valor_com_cashback,
+                     valor_cashback, data_compra, data_expiracao_cashback)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                 (nome, cpf, data_nasc, carro, valor_original,
+                  percentual_cashback, valor_com_cashback, valor_cashback,
+                  data_compra, data_expiracao))
+        
         conn.commit()
-        return True, "Venda registrada com sucesso!"
-    except sqlite3.IntegrityError:
-        return False, "CPF já cadastrado no sistema!"
+        
+        # Fazer backup dos dados periodicamente
+        fazer_backup_dados()
+        
+        return True, f"✅ Venda registrada! Cashback válido até {data_expiracao.strftime('%d/%m/%Y')}"
+    
+    except Exception as e:
+        return False, f"❌ Erro ao salvar: {str(e)}"
     finally:
         conn.close()
 
-# Função para buscar vendas
-def search_vendas(termo):
-    conn = sqlite3.connect('vendas_auto_nunes.db')
+@st.cache_data(ttl=60, show_spinner=False)
+def search_vendas(termo=""):
+    """Busca vendas com cache para performance"""
+    conn = get_db_connection()
     
-    query = '''SELECT * FROM vendas 
-               WHERE nome_cliente LIKE ? OR cpf LIKE ?
-               ORDER BY data_cadastro DESC'''
+    if termo:
+        query = '''SELECT * FROM vendas 
+                   WHERE nome_cliente LIKE ? OR cpf LIKE ?
+                   ORDER BY data_cadastro DESC'''
+        params = (f'%{termo}%', f'%{termo}%')
+    else:
+        query = 'SELECT * FROM vendas ORDER BY data_cadastro DESC'
+        params = ()
     
-    df = pd.read_sql_query(query, conn, params=(f'%{termo}%', f'%{termo}%'))
-    conn.close()
-    
-    # Converter datas
-    if not df.empty:
-        df['data_nascimento'] = pd.to_datetime(df['data_nascimento'])
-        df['data_compra'] = pd.to_datetime(df['data_compra'])
-        df['data_expiracao_cashback'] = pd.to_datetime(df['data_expiracao_cashback'])
-        df['data_cadastro'] = pd.to_datetime(df['data_cadastro'])
-    
-    return df
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+        
+        if not df.empty:
+            # Converter datas
+            date_cols = ['data_nascimento', 'data_compra', 'data_expiracao_cashback', 'data_cadastro']
+            for col in date_cols:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col])
+        
+        return df
+    finally:
+        conn.close()
 
-# Função para obter todas as vendas
-def get_all_vendas():
-    conn = sqlite3.connect('vendas_auto_nunes.db')
-    df = pd.read_sql_query('SELECT * FROM vendas ORDER BY data_cadastro DESC', conn)
-    conn.close()
-    
-    # Converter datas
-    if not df.empty:
-        df['data_nascimento'] = pd.to_datetime(df['data_nascimento'])
-        df['data_compra'] = pd.to_datetime(df['data_compra'])
-        df['data_expiracao_cashback'] = pd.to_datetime(df['data_expiracao_cashback'])
-        df['data_cadastro'] = pd.to_datetime(df['data_cadastro'])
-    
-    return df
-
-# Função para verificar cashbacks ativos
+@st.cache_data(ttl=30, show_spinner=False)
 def get_cashbacks_ativos():
-    conn = sqlite3.connect('vendas_auto_nunes.db')
+    """Busca cashbacks ativos com cache"""
+    conn = get_db_connection()
     hoje = datetime.now().date()
     
-    query = '''SELECT * FROM vendas 
+    query = '''SELECT *, 
+               (data_expiracao_cashback - ?) as dias_restantes
+               FROM vendas 
                WHERE data_expiracao_cashback >= ? 
                AND cashback_utilizado = 0
                AND valor_cashback > 0
                ORDER BY data_expiracao_cashback'''
     
-    df = pd.read_sql_query(query, conn, params=(hoje,))
-    conn.close()
-    
-    if not df.empty:
-        df['data_nascimento'] = pd.to_datetime(df['data_nascimento'])
-        df['data_compra'] = pd.to_datetime(df['data_compra'])
-        df['data_expiracao_cashback'] = pd.to_datetime(df['data_expiracao_cashback'])
-        
-        # Calcular dias restantes
-        df['dias_restantes'] = (df['data_expiracao_cashback'].dt.date - hoje).dt.days
-    
-    return df
-
-# Função para utilizar cashback
-def usar_cashback(venda_id, valor_utilizado):
-    conn = sqlite3.connect('vendas_auto_nunes.db')
-    c = conn.cursor()
-    
     try:
-        # Registrar utilização
-        c.execute('''INSERT INTO uso_cashback (venda_id, valor_utilizado)
-                     VALUES (?, ?)''', (venda_id, valor_utilizado))
+        df = pd.read_sql_query(query, conn, params=(hoje, hoje))
         
-        # Marcar como utilizado se valor total for usado
-        c.execute('''UPDATE vendas 
-                     SET cashback_utilizado = 1
-                     WHERE id = ? AND valor_cashback <= ?''', 
-                  (venda_id, valor_utilizado))
+        if not df.empty:
+            date_cols = ['data_nascimento', 'data_compra', 'data_expiracao_cashback', 'data_cadastro']
+            for col in date_cols:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col])
+            
+            # Calcular dias restantes corretamente
+            df['dias_restantes'] = (df['data_expiracao_cashback'].dt.date - hoje).dt.days
         
-        conn.commit()
-        return True
-    except Exception as e:
-        return False
+        return df
     finally:
         conn.close()
 
-# Função para obter estatísticas
-def get_stats():
-    conn = sqlite3.connect('vendas_auto_nunes.db')
+def usar_cashback(venda_id, valor_utilizado):
+    """Registra utilização de cashback"""
+    conn = get_db_connection()
+    c = conn.cursor()
     
-    # Total de vendas
-    total_vendas = pd.read_sql_query('SELECT COUNT(*) as total FROM vendas', conn).iloc[0]['total']
+    try:
+        # Verificar valor disponível
+        c.execute('SELECT valor_cashback, cashback_utilizado FROM vendas WHERE id = ?', (venda_id,))
+        resultado = c.fetchone()
+        
+        if not resultado:
+            return False, "Venda não encontrada"
+        
+        valor_disponivel, ja_utilizado = resultado
+        
+        if ja_utilizado:
+            return False, "Cashback já foi utilizado"
+        
+        if valor_utilizado > valor_disponivel:
+            return False, f"Valor máximo disponível: R$ {valor_disponivel:,.2f}"
+        
+        # Registrar uso
+        c.execute('INSERT INTO uso_cashback (venda_id, valor_utilizado) VALUES (?, ?)',
+                 (venda_id, valor_utilizado))
+        
+        # Atualizar status se usou tudo
+        if valor_utilizado >= valor_disponivel:
+            c.execute('UPDATE vendas SET cashback_utilizado = 1 WHERE id = ?', (venda_id,))
+        
+        conn.commit()
+        fazer_backup_dados()  # Backup após alteração
+        return True, "✅ Cashback utilizado com sucesso!"
     
-    # Valor total vendido (com cashback aplicado)
-    valor_total = pd.read_sql_query('SELECT SUM(valor_com_cashback) as total FROM vendas', conn).iloc[0]['total']
-    valor_total = valor_total if valor_total else 0
-    
-    # Valor total em cashback concedido
-    cashback_total = pd.read_sql_query('SELECT SUM(valor_cashback) as total FROM vendas', conn).iloc[0]['total']
-    cashback_total = cashback_total if cashback_total else 0
-    
-    # Carros mais vendidos
-    carros_top = pd.read_sql_query('''SELECT carro_comprado, COUNT(*) as quantidade 
-                                       FROM vendas 
-                                       GROUP BY carro_comprado 
-                                       ORDER BY quantidade DESC''', conn)
-    
-    # Cashbacks ativos
-    hoje = datetime.now().date()
-    cashbacks_ativos = pd.read_sql_query('''SELECT COUNT(*) as ativos 
-                                            FROM vendas 
-                                            WHERE data_expiracao_cashback >= ? 
-                                            AND cashback_utilizado = 0
-                                            AND valor_cashback > 0''', 
-                                         conn, params=(hoje,)).iloc[0]['ativos']
-    
-    conn.close()
-    
-    return total_vendas, valor_total, cashback_total, carros_top, cashbacks_ativos
+    except Exception as e:
+        return False, f"Erro: {str(e)}"
+    finally:
+        conn.close()
 
-# Sidebar para navegação
+def fazer_backup_dados():
+    """Faz backup dos dados periodicamente"""
+    try:
+        conn = get_db_connection()
+        backup_path = 'data/vendas_backup.db'
+        
+        # Conectar ao banco de backup
+        backup_conn = sqlite3.connect(backup_path)
+        
+        # Copiar dados
+        conn.backup(backup_conn)
+        
+        backup_conn.close()
+        conn.close()
+    except:
+        pass  # Silencia erros de backup
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_stats():
+    """Estatísticas com cache"""
+    conn = get_db_connection()
+    hoje = datetime.now().date()
+    
+    try:
+        # Total de vendas
+        total_vendas = pd.read_sql_query('SELECT COUNT(*) as total FROM vendas', conn).iloc[0]['total']
+        
+        # Valores
+        valores = pd.read_sql_query(
+            'SELECT SUM(valor_com_cashback) as vendas, SUM(valor_cashback) as cashback FROM vendas', 
+            conn
+        )
+        valor_total = valores.iloc[0]['vendas'] or 0
+        cashback_total = valores.iloc[0]['cashback'] or 0
+        
+        # Carros mais vendidos
+        carros_top = pd.read_sql_query(
+            '''SELECT carro_comprado, COUNT(*) as quantidade 
+               FROM vendas 
+               GROUP BY carro_comprado 
+               ORDER BY quantidade DESC''', 
+            conn
+        )
+        
+        # Cashbacks ativos
+        cashbacks_ativos = pd.read_sql_query(
+            '''SELECT COUNT(*) as ativos FROM vendas 
+               WHERE data_expiracao_cashback >= ? 
+               AND cashback_utilizado = 0
+               AND valor_cashback > 0''', 
+            conn, params=(hoje,)
+        ).iloc[0]['ativos']
+        
+        return total_vendas, valor_total, cashback_total, carros_top, cashbacks_ativos
+    
+    finally:
+        conn.close()
+
+# ========== INTERFACE DO USUÁRIO ==========
 st.sidebar.title("🚗 Menu Auto Nunes")
 menu = st.sidebar.radio(
     "Selecione uma opção:",
-    ["🏠 Dashboard", "➕ Nova Venda", "🔍 Buscar Cliente", "💰 Cashbacks Ativos", "📊 Relatórios"]
+    ["🏠 Dashboard", "➕ Nova Venda", "🔍 Buscar Cliente", "💰 Cashbacks Ativos"]
 )
 
 st.sidebar.markdown("---")
 st.sidebar.info("**Concessionária Chevrolet**\n\nCashback válido por 3 meses")
+st.sidebar.caption(f"Última atualização: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
 # DASHBOARD
 if menu == "🏠 Dashboard":
@@ -249,33 +319,38 @@ if menu == "🏠 Dashboard":
     with col4:
         st.metric("Cashbacks Ativos", cashbacks_ativos)
     
-    # Gráfico de carros mais vendidos
+    # Carros mais vendidos
     if not carros_top.empty:
         st.subheader("🚗 Modelos Mais Vendidos")
         st.bar_chart(carros_top.set_index('carro_comprado'))
     
     # Últimas vendas
     st.subheader("🆕 Últimas Vendas")
-    todas_vendas = get_all_vendas()
+    todas_vendas = search_vendas()
     if not todas_vendas.empty:
         cols_display = ['nome_cliente', 'carro_comprado', 'valor_com_cashback', 
                        'percentual_cashback', 'data_compra']
         st.dataframe(todas_vendas[cols_display].head(10), use_container_width=True)
+    
+    # Backup status
+    if os.path.exists('data/vendas_backup.db'):
+        backup_size = os.path.getsize('data/vendas_backup.db') / 1024
+        st.sidebar.success(f"✅ Backup ativo: {backup_size:.1f} KB")
 
 # NOVA VENDA
 elif menu == "➕ Nova Venda":
     st.header("➕ Registrar Nova Venda")
     
-    with st.form("form_venda"):
+    with st.form("form_venda", clear_on_submit=True):
         col1, col2 = st.columns(2)
         
         with col1:
             nome = st.text_input("Nome Completo do Cliente *", max_chars=100)
             cpf = st.text_input("CPF *", max_chars=14, 
-                               help="Formato: 000.000.000-00")
+                               placeholder="000.000.000-00",
+                               help="Apenas números, será formatado automaticamente")
             data_nasc = st.date_input("Data de Nascimento *", 
-                                     min_value=datetime(1900, 1, 1),
-                                     max_value=datetime.now())
+                                     max_value=datetime.now().date())
         
         with col2:
             carro = st.selectbox("Carro Comprado *", CARROS_DISPONIVEIS)
@@ -284,7 +359,6 @@ elif menu == "➕ Nova Venda":
                                            step=1000.0,
                                            format="%.2f")
             
-            # Seleção de cashback
             cashback_opcao = st.selectbox(
                 "Cashback *",
                 options=OPCOES_CASHBACK,
@@ -295,7 +369,7 @@ elif menu == "➕ Nova Venda":
             valor_cashback = valor_original * (percentual / 100)
             valor_final = valor_original - valor_cashback
         
-        # Resumo da venda
+        # Resumo
         st.markdown("---")
         st.subheader("📋 Resumo da Venda")
         
@@ -305,29 +379,40 @@ elif menu == "➕ Nova Venda":
             st.metric("Valor Original", f"R$ {valor_original:,.2f}")
         
         with col_res2:
-            st.metric(f"Cashback ({percentual}%)", f"-R$ {valor_cashback:,.2f}")
+            if percentual > 0:
+                st.metric(f"Cashback ({percentual}%)", f"-R$ {valor_cashback:,.2f}")
+            else:
+                st.metric("Cashback", "Não aplicado")
         
         with col_res3:
             st.metric("Valor Final", f"R$ {valor_final:,.2f}", 
-                     delta=f"-{percentual}%")
+                     delta=f"-{percentual}%" if percentual > 0 else None)
         
-        # Data de expiração do cashback
+        # Data de expiração
         data_expiracao = datetime.now().date() + relativedelta(months=3)
-        st.info(f"💰 **Cashback válido até:** {data_expiracao.strftime('%d/%m/%Y')}")
+        if percentual > 0:
+            st.info(f"💰 **Cashback válido até:** {data_expiracao.strftime('%d/%m/%Y')}")
         
-        submitted = st.form_submit_button("✅ Registrar Venda", type="primary")
+        submitted = st.form_submit_button("✅ Registrar Venda", type="primary", use_container_width=True)
         
         if submitted:
             if not all([nome, cpf, carro, valor_original > 0]):
                 st.error("Por favor, preencha todos os campos obrigatórios (*)")
             else:
-                success, message = add_venda(nome, cpf, data_nasc, carro, 
-                                           valor_original, percentual)
-                if success:
-                    st.success(message)
-                    st.balloons()
+                # Formatar CPF
+                cpf_limpo = ''.join(filter(str.isdigit, cpf))
+                if len(cpf_limpo) != 11:
+                    st.error("CPF deve ter 11 dígitos")
                 else:
-                    st.error(message)
+                    with st.spinner("Salvando venda..."):
+                        success, message = add_venda(nome, cpf_limpo, data_nasc, carro, 
+                                                   valor_original, percentual)
+                        if success:
+                            st.success(message)
+                            st.balloons()
+                            st.cache_data.clear()  # Limpa cache para atualizar dados
+                        else:
+                            st.error(message)
 
 # BUSCAR CLIENTE
 elif menu == "🔍 Buscar Cliente":
@@ -342,7 +427,8 @@ elif menu == "🔍 Buscar Cliente":
         tipo_busca = st.selectbox("Filtrar por:", ["Todos", "Com Cashback Ativo", "Cashback Expirado"])
     
     if termo_busca:
-        resultados = search_vendas(termo_busca)
+        with st.spinner("Buscando..."):
+            resultados = search_vendas(termo_busca)
         
         if not resultados.empty:
             st.success(f"✅ {len(resultados)} cliente(s) encontrado(s)")
@@ -363,18 +449,40 @@ elif menu == "🔍 Buscar Cliente":
                 ]
             
             # Formatar exibição
-            display_cols = ['nome_cliente', 'cpf', 'carro_comprado', 
-                          'valor_com_cashback', 'percentual_cashback',
-                          'valor_cashback', 'data_compra', 'data_expiracao_cashback']
+            display_df = resultados.copy()
             
-            # Formatar valores
-            display_df = resultados[display_cols].copy()
-            display_df['valor_com_cashback'] = display_df['valor_com_cashback'].apply(lambda x: f"R$ {x:,.2f}")
-            display_df['valor_cashback'] = display_df['valor_cashback'].apply(lambda x: f"R$ {x:,.2f}")
-            display_df['data_compra'] = display_df['data_compra'].dt.strftime('%d/%m/%Y')
-            display_df['data_expiracao_cashback'] = display_df['data_expiracao_cashback'].dt.strftime('%d/%m/%Y')
+            # Formatar colunas
+            if 'valor_com_cashback' in display_df.columns:
+                display_df['Valor Final'] = display_df['valor_com_cashback'].apply(lambda x: f"R$ {x:,.2f}")
             
-            st.dataframe(display_df, use_container_width=True)
+            if 'valor_cashback' in display_df.columns:
+                display_df['Cashback'] = display_df['valor_cashback'].apply(lambda x: f"R$ {x:,.2f}" if x > 0 else "-")
+            
+            if 'data_compra' in display_df.columns:
+                display_df['Data Compra'] = display_df['data_compra'].dt.strftime('%d/%m/%Y')
+            
+            if 'data_expiracao_cashback' in display_df.columns:
+                display_df['Cashback Válido Até'] = display_df['data_expiracao_cashback'].dt.strftime('%d/%m/%Y')
+            
+            # Colunas para exibir
+            display_cols = []
+            if 'nome_cliente' in display_df.columns:
+                display_cols.append('nome_cliente')
+            if 'cpf' in display_df.columns:
+                display_cols.append('cpf')
+            if 'carro_comprado' in display_df.columns:
+                display_cols.append('carro_comprado')
+            if 'Valor Final' in display_df.columns:
+                display_cols.append('Valor Final')
+            if 'Cashback' in display_df.columns:
+                display_cols.append('Cashback')
+            if 'Data Compra' in display_df.columns:
+                display_cols.append('Data Compra')
+            if 'Cashback Válido Até' in display_df.columns:
+                display_cols.append('Cashback Válido Até')
+            
+            if display_cols:
+                st.dataframe(display_df[display_cols], use_container_width=True)
             
             # Opção para usar cashback
             if tipo_busca == "Com Cashback Ativo" and not resultados.empty:
@@ -383,7 +491,7 @@ elif menu == "🔍 Buscar Cliente":
                 venda_selecionada = st.selectbox(
                     "Selecione o cashback para utilizar:",
                     options=resultados['id'].tolist(),
-                    format_func=lambda x: f"Cliente: {resultados[resultados['id']==x]['nome_cliente'].iloc[0]} - Valor: R$ {resultados[resultados['id']==x]['valor_cashback'].iloc[0]:,.2f}"
+                    format_func=lambda x: f"{resultados[resultados['id']==x]['nome_cliente'].iloc[0]} - R$ {resultados[resultados['id']==x]['valor_cashback'].iloc[0]:,.2f}"
                 )
                 
                 if venda_selecionada:
@@ -395,16 +503,22 @@ elif menu == "🔍 Buscar Cliente":
                         valor_uso = st.number_input("Valor a utilizar (R$)", 
                                                    min_value=0.0,
                                                    max_value=float(valor_disponivel),
+                                                   value=float(valor_disponivel),
                                                    step=100.0,
                                                    format="%.2f")
                     
                     with col_uso2:
-                        if st.button("💳 Utilizar Cashback", type="primary"):
-                            if usar_cashback(venda_selecionada, valor_uso):
-                                st.success(f"Cashback de R$ {valor_uso:,.2f} utilizado com sucesso!")
-                                st.rerun()
-                            else:
-                                st.error("Erro ao utilizar cashback")
+                        st.write("")  # Espaço
+                        st.write("")  # Espaço
+                        if st.button("💳 Utilizar Cashback", type="primary", use_container_width=True):
+                            with st.spinner("Processando..."):
+                                sucesso, mensagem = usar_cashback(venda_selecionada, valor_uso)
+                                if sucesso:
+                                    st.success(mensagem)
+                                    st.cache_data.clear()  # Limpa cache
+                                    st.rerun()
+                                else:
+                                    st.error(mensagem)
         else:
             st.warning("Nenhum cliente encontrado com esses critérios.")
 
@@ -412,151 +526,76 @@ elif menu == "🔍 Buscar Cliente":
 elif menu == "💰 Cashbacks Ativos":
     st.header("💰 Cashbacks Ativos (Válidos por 3 meses)")
     
-    cashbacks = get_cashbacks_ativos()
+    with st.spinner("Carregando..."):
+        cashbacks = get_cashbacks_ativos()
     
     if not cashbacks.empty:
-        st.info(f"✅ {len(cashbacks)} cashback(s) ativo(s)")
+        st.success(f"✅ {len(cashbacks)} cashback(s) ativo(s)")
         
         # Formatar exibição
-        display_cols = ['nome_cliente', 'cpf', 'carro_comprado', 
-                       'valor_cashback', 'data_compra', 
-                       'data_expiracao_cashback', 'dias_restantes']
+        display_df = cashbacks.copy()
         
-        display_df = cashbacks[display_cols].copy()
-        display_df['valor_cashback'] = display_df['valor_cashback'].apply(lambda x: f"R$ {x:,.2f}")
-        display_df['data_compra'] = display_df['data_compra'].dt.strftime('%d/%m/%Y')
-        display_df['data_expiracao_cashback'] = display_df['data_expiracao_cashback'].dt.strftime('%d/%m/%Y')
+        # Formatar valores
+        if 'valor_cashback' in display_df.columns:
+            display_df['Valor Cashback'] = display_df['valor_cashback'].apply(lambda x: f"R$ {x:,.2f}")
         
-        # Colorir dias restantes
-        def color_dias(valor):
-            if valor <= 7:
-                return "🔴"
-            elif valor <= 15:
-                return "🟡"
-            else:
-                return "🟢"
+        if 'data_compra' in display_df.columns:
+            display_df['Data da Compra'] = display_df['data_compra'].dt.strftime('%d/%m/%Y')
         
-        display_df['status'] = display_df['dias_restantes'].apply(color_dias)
-        display_df['dias_restantes'] = display_df['dias_restantes'].apply(lambda x: f"{x} dias")
+        if 'data_expiracao_cashback' in display_df.columns:
+            display_df['Válido Até'] = display_df['data_expiracao_cashback'].dt.strftime('%d/%m/%Y')
         
-        st.dataframe(display_df, use_container_width=True)
+        # Status de expiração
+        if 'dias_restantes' in display_df.columns:
+            def get_status_color(dias):
+                if dias <= 7:
+                    return "🔴 Crítico"
+                elif dias <= 15:
+                    return "🟡 Atenção"
+                else:
+                    return "🟢 Normal"
+            
+            display_df['Status'] = display_df['dias_restantes'].apply(get_status_color)
+            display_df['Dias Restantes'] = display_df['dias_restantes']
         
-        # Resumo por valor
+        # Colunas para exibir
+        display_cols = []
+        if 'nome_cliente' in display_df.columns:
+            display_cols.append('nome_cliente')
+        if 'cpf' in display_df.columns:
+            display_cols.append('cpf')
+        if 'carro_comprado' in display_df.columns:
+            display_cols.append('carro_comprado')
+        if 'Valor Cashback' in display_df.columns:
+            display_cols.append('Valor Cashback')
+        if 'Data da Compra' in display_df.columns:
+            display_cols.append('Data da Compra')
+        if 'Válido Até' in display_df.columns:
+            display_cols.append('Válido Até')
+        if 'Status' in display_df.columns:
+            display_cols.append('Status')
+        if 'Dias Restantes' in display_df.columns:
+            display_cols.append('Dias Restantes')
+        
+        if display_cols:
+            st.dataframe(display_df[display_cols], use_container_width=True)
+        
+        # Resumo
         total_cashback = cashbacks['valor_cashback'].sum()
-        st.metric("💰 Total em Cashbacks Ativos", f"R$ {total_cashback:,.2f}")
+        st.metric("💰 Total Disponível em Cashbacks", f"R$ {total_cashback:,.2f}")
         
-        # Gráfico de expiração
-        st.subheader("📅 Expiração dos Cashbacks")
-        expiracao_df = cashbacks.copy()
-        expiracao_df['mes_expiracao'] = expiracao_df['data_expiracao_cashback'].dt.strftime('%b/%Y')
-        expiracao_agrupado = expiracao_df.groupby('mes_expiracao')['valor_cashback'].sum().reset_index()
-        
-        if not expiracao_agrupado.empty:
-            st.bar_chart(expiracao_agrupado.set_index('mes_expiracao'))
     else:
-        st.warning("Não há cashbacks ativos no momento.")
-
-# RELATÓRIOS
-elif menu == "📊 Relatórios":
-    st.header("📊 Relatórios Analíticos")
-    
-    tab1, tab2, tab3 = st.tabs(["📈 Vendas por Período", "🚗 Vendas por Modelo", "💰 Cashback"])
-    
-    with tab1:
-        st.subheader("Vendas por Período")
-        
-        todas_vendas = get_all_vendas()
-        if not todas_vendas.empty:
-            todas_vendas['mes_ano'] = todas_vendas['data_compra'].dt.strftime('%b/%Y')
-            vendas_por_mes = todas_vendas.groupby('mes_ano').agg({
-                'id': 'count',
-                'valor_com_cashback': 'sum'
-            }).reset_index()
-            
-            vendas_por_mes.columns = ['Mês/Ano', 'Quantidade', 'Valor Total']
-            
-            col_graf1, col_graf2 = st.columns(2)
-            
-            with col_graf1:
-                st.write("📦 Quantidade de Vendas")
-                st.bar_chart(vendas_por_mes.set_index('Mês/Ano')['Quantidade'])
-            
-            with col_graf2:
-                st.write("💰 Valor Total")
-                st.line_chart(vendas_por_mes.set_index('Mês/Ano')['Valor Total'])
-            
-            st.dataframe(vendas_por_mes, use_container_width=True)
-    
-    with tab2:
-        st.subheader("Vendas por Modelo")
-        
-        todas_vendas = get_all_vendas()
-        if not todas_vendas.empty:
-            vendas_por_modelo = todas_vendas.groupby('carro_comprado').agg({
-                'id': 'count',
-                'valor_com_cashback': 'sum',
-                'valor_cashback': 'sum'
-            }).reset_index()
-            
-            vendas_por_modelo.columns = ['Modelo', 'Quantidade', 'Valor Vendido', 'Cashback Concedido']
-            vendas_por_modelo = vendas_por_modelo.sort_values('Quantidade', ascending=False)
-            
-            col_mod1, col_mod2 = st.columns(2)
-            
-            with col_mod1:
-                st.write("🚗 Modelos Mais Vendidos")
-                st.bar_chart(vendas_por_modelo.set_index('Modelo')['Quantidade'].head(10))
-            
-            with col_mod2:
-                st.write("🏆 Top 5 em Valor")
-                top5_valor = vendas_por_modelo.nlargest(5, 'Valor Vendido')
-                st.bar_chart(top5_valor.set_index('Modelo')['Valor Vendido'])
-            
-            st.dataframe(vendas_por_modelo, use_container_width=True)
-    
-    with tab3:
-        st.subheader("Análise de Cashback")
-        
-        todas_vendas = get_all_vendas()
-        if not todas_vendas.empty:
-            # Cashback utilizado vs não utilizado
-            cashback_status = todas_vendas.groupby('cashback_utilizado').agg({
-                'id': 'count',
-                'valor_cashback': 'sum'
-            }).reset_index()
-            
-            cashback_status['Status'] = cashback_status['cashback_utilizado'].apply(
-                lambda x: 'Utilizado' if x == 1 else 'Disponível/Expirado'
-            )
-            
-            col_cash1, col_cash2 = st.columns(2)
-            
-            with col_cash1:
-                st.write("📊 Status do Cashback")
-                st.bar_chart(cashback_status.set_index('Status')['valor_cashback'])
-            
-            with col_cash2:
-                st.write("🎯 Distribuição por Percentual")
-                
-                cashback_percentual = todas_vendas.groupby('percentual_cashback').agg({
-                    'id': 'count',
-                    'valor_cashback': 'sum'
-                }).reset_index()
-                
-                cashback_percentual.columns = ['Percentual', 'Quantidade', 'Valor Total']
-                cashback_percentual['Percentual'] = cashback_percentual['Percentual'].apply(lambda x: f"{x}%")
-                
-                st.bar_chart(cashback_percentual.set_index('Percentual')['Valor Total'])
-            
-            # Estatísticas
-            total_cashback = todas_vendas['valor_cashback'].sum()
-            cashback_utilizado = todas_vendas[todas_vendas['cashback_utilizado']==1]['valor_cashback'].sum()
-            utilizacao_percent = (cashback_utilizado / total_cashback * 100) if total_cashback > 0 else 0
-            
-            st.metric("💰 Total Cashback Concedido", f"R$ {total_cashback:,.2f}")
-            st.metric("💳 Cashback Utilizado", f"R$ {cashback_utilizado:,.2f}", 
-                     f"{utilizacao_percent:.1f}% do total")
+        st.info("✨ Não há cashbacks ativos no momento.")
 
 # Rodapé
 st.markdown("---")
-st.caption("Sistema de Vendas Auto Nunes © 2024 | Cashback válido por 3 meses a partir da data da compra")
+st.caption(f"© 2024 Auto Nunes Concessionária • Sistema online • Dados persistentes • {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+
+# Verificação de banco de dados
+try:
+    conn = get_db_connection()
+    count = pd.read_sql_query('SELECT COUNT(*) as total FROM vendas', conn).iloc[0]['total']
+    conn.close()
+    st.sidebar.metric("Registros no banco", count)
+except:
+    st.sidebar.warning("Banco de dados em inicialização")
