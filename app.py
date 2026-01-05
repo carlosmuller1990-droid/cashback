@@ -124,10 +124,49 @@ elif menu == "➕ Nova Venda":
                     "Data_Venda": data_venda
                 }
 
+                # Adiciona nova venda ao DataFrame
                 df = pd.concat([df, pd.DataFrame([nova_venda])], ignore_index=True)
+
+                # Salva backup local
                 df.to_csv(ARQUIVO_DADOS, index=False)
 
                 st.success("Venda registrada com sucesso!")
+
+                # =============================
+                # BACKUP AUTOMÁTICO NO GITHUB
+                # =============================
+                try:
+                    from github import Github
+                    import base64
+
+                    # Pega token do Secrets
+                    TOKEN = st.secrets["GITHUB_TOKEN"]
+                    REPO = "usuario/backup-vendas-auto"  # Substitua pelo seu repositório
+                    ARQUIVO = ARQUIVO_DADOS
+
+                    # Conecta ao GitHub
+                    g = Github(TOKEN)
+                    repo = g.get_repo(REPO)
+
+                    # Lê CSV local
+                    with open(ARQUIVO, "rb") as f:
+                        conteudo = f.read()
+
+                    # Converte para base64
+                    conteudo_base64 = base64.b64encode(conteudo).decode()
+
+                    # Cria ou atualiza arquivo no GitHub
+                    try:
+                        arquivo_github = repo.get_contents(ARQUIVO)
+                        repo.update_file(ARQUIVO, "Atualizando backup", conteudo_base64, arquivo_github.sha)
+                    except:
+                        repo.create_file(ARQUIVO, "Criando backup inicial", conteudo_base64)
+
+                    st.info("Backup enviado para o GitHub com sucesso!")
+
+                except Exception as e:
+                    st.error(f"Erro ao enviar backup para GitHub: {e}")
+
             else:
                 st.error("Preencha todos os campos obrigatórios (*)")
 
