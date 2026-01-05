@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date
+from datetime import date
 import os
 
 # =============================
@@ -12,13 +12,13 @@ st.set_page_config(
     layout="wide"
 )
 
-ARQUIVO_DADOS = "backup_vendas.xlsx"
+ARQUIVO_DADOS = "backup_vendas.csv"
 
 # =============================
 # INICIALIZAÇÃO DO ARQUIVO
 # =============================
 if os.path.exists(ARQUIVO_DADOS):
-    df = pd.read_excel(ARQUIVO_DADOS)
+    df = pd.read_csv(ARQUIVO_DADOS)
 else:
     df = pd.DataFrame(columns=[
         "Cliente",
@@ -28,7 +28,7 @@ else:
         "Valor_Cashback",
         "Data_Venda"
     ])
-    df.to_excel(ARQUIVO_DADOS, index=False)
+    df.to_csv(ARQUIVO_DADOS, index=False)
 
 # =============================
 # TÍTULO
@@ -58,8 +58,8 @@ if menu == "📊 Dashboard":
     st.header("📊 Dashboard de Vendas")
 
     total_vendas = len(df)
-    valor_total = df["Valor_Venda"].sum()
-    cashback_total = df["Valor_Cashback"].sum()
+    valor_total = df["Valor_Venda"].astype(float).sum()
+    cashback_total = df["Valor_Cashback"].astype(float).sum()
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total de Vendas", total_vendas)
@@ -67,14 +67,14 @@ if menu == "📊 Dashboard":
     c3.metric("Cashback Concedido", f"R$ {cashback_total:,.2f}")
 
     st.markdown("---")
-    st.subheader("🚗 Quantidade de Carros Vendidos por Modelo")
+    st.subheader("🚗 Carros Vendidos por Modelo")
 
     if not df.empty:
         carros = df.groupby("Modelo").size().reset_index(name="Quantidade")
         st.bar_chart(carros.set_index("Modelo"))
         st.dataframe(carros, use_container_width=True)
     else:
-        st.info("Nenhuma venda registrada ainda.")
+        st.info("Nenhuma venda registrada.")
 
 # =============================
 # NOVA VENDA
@@ -94,7 +94,9 @@ elif menu == "➕ Nova Venda":
             data_venda = st.date_input("Data da Venda", value=date.today())
 
         with col2:
-            valor_venda = st.number_input("Valor da Venda (R$)", min_value=0.0, step=1000.0)
+            valor_venda = st.number_input(
+                "Valor da Venda (R$)", min_value=0.0, step=1000.0
+            )
             percentual = st.selectbox("Percentual de Cashback", [0, 5, 10, 15, 20])
 
         valor_cashback = valor_venda * (percentual / 100)
@@ -109,7 +111,7 @@ elif menu == "➕ Nova Venda":
 
         if salvar:
             if cliente and valor_venda > 0:
-                nova_linha = {
+                nova_venda = {
                     "Cliente": cliente,
                     "Modelo": modelo,
                     "Valor_Venda": valor_venda,
@@ -117,8 +119,8 @@ elif menu == "➕ Nova Venda":
                     "Valor_Cashback": valor_cashback,
                     "Data_Venda": data_venda
                 }
-                df = pd.concat([df, pd.DataFrame([nova_linha])], ignore_index=True)
-                df.to_excel(ARQUIVO_DADOS, index=False)
+                df = pd.concat([df, pd.DataFrame([nova_venda])], ignore_index=True)
+                df.to_csv(ARQUIVO_DADOS, index=False)
                 st.success("Venda registrada com sucesso!")
             else:
                 st.error("Preencha todos os campos obrigatórios.")
@@ -144,20 +146,19 @@ elif menu == "🔍 Buscar Cliente":
 elif menu == "📄 Relatórios":
     st.header("📄 Relatórios")
 
-    st.subheader("📊 Quantidade de Carros Vendidos")
+    st.subheader("🚗 Quantidade de Carros Vendidos")
 
-    relatorio_carros = df.groupby("Modelo").size().reset_index(name="Quantidade")
-    st.dataframe(relatorio_carros, use_container_width=True)
+    relatorio = df.groupby("Modelo").size().reset_index(name="Quantidade")
+    st.dataframe(relatorio, use_container_width=True)
 
-    caminho_excel = "relatorio_vendas.xlsx"
-    df.to_excel(caminho_excel, index=False)
+    csv = df.to_csv(index=False).encode("utf-8")
 
-    with open(caminho_excel, "rb") as f:
-        st.download_button(
-            "⬇ Baixar relatório completo (Excel)",
-            f,
-            file_name="relatorio_vendas.xlsx"
-        )
+    st.download_button(
+        "⬇ Baixar relatório (CSV)",
+        csv,
+        file_name="relatorio_vendas.csv",
+        mime="text/csv"
+    )
 
 # =============================
 # RODAPÉ
