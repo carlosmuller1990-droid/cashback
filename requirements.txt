@@ -1,3 +1,6 @@
-streamlit==1.28.0
-pandas==2.0.3
-python-dateutil==2.8.2
+cd "C:\Users\BDC\Documents\CARLOS PYTHON\excel"
+# Apague o antigo e crie um novo
+del requirements.txt
+echo streamlit==1.28.0 > requirements.txt
+echo pandas==2.0.3 >> requirements.txt
+echo python-dateutil==2.8.2 >> requirements.txt
