@@ -1,0 +1,6 @@
+cashback/
+ ├─ app.py
+ └─ data/
+     ├─ clientes.csv
+     ├─ historico.csv
+     └─ backup.csv
