@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
 from datetime import date, timedelta
 import os
 from io import BytesIO
 
 # =============================
-# LOGIN
+# LOGIN SIMPLES
 # =============================
 USUARIOS = {
     "carlos": {"senha": "1234", "perfil": "admin"},
@@ -17,19 +18,16 @@ if "logado" not in st.session_state:
 
 if not st.session_state.logado:
     st.title("🔐 Login")
-
-    user = st.text_input("Usuário")
-    pwd = st.text_input("Senha", type="password")
+    u = st.text_input("Usuário")
+    s = st.text_input("Senha", type="password")
 
     if st.button("Entrar"):
-        if user in USUARIOS and pwd == USUARIOS[user]["senha"]:
+        if u in USUARIOS and s == USUARIOS[u]["senha"]:
             st.session_state.logado = True
-            st.session_state.usuario = user
-            st.session_state.perfil = USUARIOS[user]["perfil"]
+            st.session_state.perfil = USUARIOS[u]["perfil"]
             st.rerun()
         else:
             st.error("Usuário ou senha inválidos")
-
     st.stop()
 
 # =============================
@@ -42,10 +40,10 @@ st.set_page_config(
 )
 
 ARQUIVO_DADOS = "backup-vendas-auto.csv"
-ARQUIVO_HISTORICO = "historico-cashback.csv"
+ARQUIVO_HIST = "historico-cashback.csv"
 
 # =============================
-# FUNÇÃO CPF
+# CPF
 # =============================
 def cpf_valido(cpf):
     cpf = ''.join(filter(str.isdigit, cpf))
@@ -63,7 +61,6 @@ def cpf_valido(cpf):
 # =============================
 if os.path.exists(ARQUIVO_DADOS):
     df = pd.read_csv(ARQUIVO_DADOS, dtype={"CPF": str})
-    df["Data_Venda"] = pd.to_datetime(df["Data_Venda"])
 else:
     df = pd.DataFrame(columns=[
         "Nome","CPF","Veiculo","Valor_Venda",
@@ -72,14 +69,19 @@ else:
     ])
     df.to_csv(ARQUIVO_DADOS, index=False)
 
-if os.path.exists(ARQUIVO_HISTORICO):
-    hist = pd.read_csv(ARQUIVO_HISTORICO, dtype={"CPF": str, "CPF_Vendedor": str})
+for col in ["Data_Venda","Data_Expiracao"]:
+    if col not in df.columns:
+        df[col] = pd.NaT
+    df[col] = pd.to_datetime(df[col], errors="coerce")
+
+if os.path.exists(ARQUIVO_HIST):
+    hist = pd.read_csv(ARQUIVO_HIST, dtype={"CPF": str,"CPF_Vendedor": str})
 else:
     hist = pd.DataFrame(columns=[
         "Nome","CPF","Valor_Usado","Motivo",
         "Vendedor","CPF_Vendedor","Data"
     ])
-    hist.to_csv(ARQUIVO_HISTORICO, index=False)
+    hist.to_csv(ARQUIVO_HIST, index=False)
 
 # =============================
 # TÍTULO
@@ -100,23 +102,28 @@ menu = st.sidebar.radio(
 # DASHBOARD
 # =============================
 if menu == "📊 Dashboard de Vendas":
-    total_vendas = len(df)
-    valor_total = df["Valor_Venda"].sum()
-    cashback_total = df["Valor_Cashback"].sum()
-
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total de Vendas", total_vendas)
-    c2.metric("Valor Total Vendido", f"R$ {valor_total:,.2f}")
-    c3.metric("Cashback Concedido", f"R$ {cashback_total:,.2f}")
+    c1.metric("Total de Vendas", len(df))
+    c2.metric("Valor Total Vendido", f"R$ {df['Valor_Venda'].sum():,.2f}")
+    c3.metric("Cashback Concedido", f"R$ {df['Valor_Cashback'].sum():,.2f}")
 
     st.subheader("🚗 Quantidade de Carros Vendidos")
+
     if not df.empty:
         carros = df.groupby("Veiculo").size().reset_index(name="Qtd")
-        st.bar_chart(carros.set_index("Veiculo"))
+
+        grafico = alt.Chart(carros).mark_bar().encode(
+            x=alt.X("Veiculo:N", title="Veículo"),
+            y=alt.Y("Qtd:Q", title="Quantidade Vendida"),
+            color=alt.Color("Veiculo:N", legend=None),
+            tooltip=["Veiculo","Qtd"]
+        ).properties(height=400)
+
+        st.altair_chart(grafico, use_container_width=True)
 
     alerta = df[
         (df["Saldo_Cashback"] > 0) &
-        (df["Data_Expiracao"] <= date.today() + timedelta(days=7))
+        (df["Data_Expiracao"] <= pd.Timestamp(date.today() + timedelta(days=7)))
     ]
     if not alerta.empty:
         st.warning("🔔 Cashback a vencer em até 7 dias")
@@ -128,18 +135,17 @@ elif menu == "➕ Nova Venda":
     with st.form("venda"):
         nome = st.text_input("Nome do Cliente *")
         cpf = st.text_input("CPF *")
-        veiculo = st.selectbox("Veículo", [
-            "Onix","Onix Plus","Tracker","Spin",
-            "Montana","S10","Blazer","Spark EV","Captiva EV"
-        ])
-        valor = st.number_input("Valor da Venda", min_value=0.0, step=1000.0)
-        perc = st.selectbox("Cashback (%)", [0,5,10,15,20])
-
-        salvar = st.form_submit_button("Salvar")
+        veiculo = st.selectbox(
+            "Veículo",
+            ["Onix","Onix Plus","Tracker","Spin","Montana","S10","Blazer","Spark EV","Captiva EV"]
+        )
+        valor = st.number_input("Valor da Venda (R$)", min_value=0.0, step=1000.0)
+        perc = st.selectbox("Percentual de Cashback", [0,5,10,15,20])
+        salvar = st.form_submit_button("Salvar Venda")
 
         if salvar:
-            if not cpf_valido(cpf):
-                st.error("CPF inválido")
+            if not nome or not cpf_valido(cpf):
+                st.error("CPF inválido ou campos obrigatórios vazios")
             else:
                 cashback = valor * (perc/100)
                 nova = {
@@ -153,44 +159,71 @@ elif menu == "➕ Nova Venda":
                     "Data_Venda": date.today(),
                     "Data_Expiracao": date.today() + timedelta(days=90)
                 }
-                df = pd.concat([df, pd.DataFrame([nova])])
+                df = pd.concat([df, pd.DataFrame([nova])], ignore_index=True)
                 df.to_csv(ARQUIVO_DADOS, index=False)
-                st.success("Venda registrada")
+                st.success("Venda registrada com sucesso")
 
 # =============================
 # BUSCAR CLIENTE / USAR CASHBACK
 # =============================
 elif menu == "🔍 Buscar Cliente":
-    busca = st.text_input("Nome ou CPF")
-    resultado = df[df["Nome"].str.contains(busca, case=False, na=False) | df["CPF"].str.contains(busca, na=False)]
+    busca = st.text_input("Digite o nome ou CPF do cliente")
+    resultado = df[
+        df["Nome"].str.contains(busca, case=False, na=False) |
+        df["CPF"].str.contains(busca, na=False)
+    ] if busca else df
 
-    st.dataframe(resultado)
+    st.dataframe(resultado, use_container_width=True)
 
     if not resultado.empty:
         linha = resultado.iloc[0]
+
         if linha["Saldo_Cashback"] > 0:
-            with st.form("usar_cashback"):
-                valor = st.number_input("Valor a usar", max_value=linha["Saldo_Cashback"])
-                motivo = st.text_input("Motivo *")
+            st.markdown("### 💰 Usar Cashback")
+            with st.form("usar_cb"):
+                valor = st.number_input(
+                    "Valor a usar",
+                    min_value=0.0,
+                    max_value=float(linha["Saldo_Cashback"])
+                )
+                motivo = st.text_input("Motivo do uso *")
                 vendedor = st.text_input("Nome do Vendedor *")
                 cpf_v = st.text_input("CPF do Vendedor *")
                 usar = st.form_submit_button("Usar Cashback")
 
                 if usar:
-                    df.loc[linha.name,"Saldo_Cashback"] -= valor
-                    hist.loc[len(hist)] = [
-                        linha["Nome"],linha["CPF"],valor,motivo,
-                        vendedor,cpf_v,date.today()
-                    ]
-                    df.to_csv(ARQUIVO_DADOS, index=False)
-                    hist.to_csv(ARQUIVO_HISTORICO, index=False)
-                    st.success("Cashback utilizado")
+                    if not cpf_valido(cpf_v) or not motivo:
+                        st.error("Dados do vendedor ou motivo inválidos")
+                    else:
+                        df.loc[linha.name,"Saldo_Cashback"] -= valor
+                        hist.loc[len(hist)] = [
+                            linha["Nome"],linha["CPF"],valor,motivo,
+                            vendedor,cpf_v,date.today()
+                        ]
+                        df.to_csv(ARQUIVO_DADOS, index=False)
+                        hist.to_csv(ARQUIVO_HIST, index=False)
+                        st.success("Cashback utilizado com sucesso")
 
 # =============================
-# RELATÓRIO
+# RELATÓRIOS
 # =============================
 elif menu == "📄 Relatórios":
-    st.dataframe(df)
+    st.subheader("📊 Vendas")
+    st.dataframe(df, use_container_width=True)
+
     buffer = BytesIO()
-    df.to_excel(buffer, index=False)
-    st.download_button("⬇ Baixar Excel", buffer.getvalue(), "relatorio.xlsx")
+    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="Vendas")
+        hist.to_excel(writer, index=False, sheet_name="Histórico Cashback")
+
+    st.download_button(
+        "⬇ Baixar Relatório Excel",
+        buffer.getvalue(),
+        "relatorio_vendas.xlsx"
+    )
+
+# =============================
+# RODAPÉ
+# =============================
+st.markdown("---")
+st.caption("Sistema desenvolvido por Carlos Jr - Supervisor BDC")
