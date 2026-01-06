@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 import os
+import re
 
 # ======================
 # CONFIG
@@ -16,6 +17,26 @@ BACKUP_FILE = f"{DATA_DIR}/backup.csv"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # ======================
+# FUNÇÃO CPF
+# ======================
+def validar_cpf(cpf):
+    cpf = re.sub(r"\D", "", cpf)
+
+    if len(cpf) != 11:
+        return False
+
+    if cpf == cpf[0] * 11:
+        return False
+
+    for i in range(9, 11):
+        soma = sum(int(cpf[num]) * ((i + 1) - num) for num in range(i))
+        digito = ((soma * 10) % 11) % 10
+        if digito != int(cpf[i]):
+            return False
+
+    return True
+
+# ======================
 # LOAD / SAVE
 # ======================
 def load_csv(path, columns):
@@ -26,16 +47,17 @@ def load_csv(path, columns):
 def save_csv(df, path):
     df.to_csv(path, index=False)
 
-clientes = load_csv(CLIENTES_FILE, ["cliente", "saldo"])
+clientes = load_csv(CLIENTES_FILE, ["cliente", "cpf", "saldo"])
 historico = load_csv(
     HISTORICO_FILE,
-    ["data", "cliente", "tipo", "valor", "motivo", "vendedor"]
+    ["data", "cliente", "cpf", "tipo", "valor", "motivo", "vendedor"]
 )
 
 # ======================
 # EXPIRAÇÃO AUTOMÁTICA
 # ======================
 hoje = datetime.now().date()
+
 if not historico.empty:
     historico["data"] = pd.to_datetime(historico["data"])
     vencidos = historico[
@@ -44,10 +66,11 @@ if not historico.empty:
     ]
 
     for _, row in vencidos.iterrows():
-        clientes.loc[clientes["cliente"] == row["cliente"], "saldo"] -= row["valor"]
+        clientes.loc[clientes["cpf"] == row["cpf"], "saldo"] -= row["valor"]
         historico = historico.append({
             "data": datetime.now(),
             "cliente": row["cliente"],
+            "cpf": row["cpf"],
             "tipo": "EXPIRADO",
             "valor": row["valor"],
             "motivo": "Expiração automática",
@@ -66,36 +89,55 @@ menu = st.sidebar.selectbox(
 # CLIENTES
 # ======================
 if menu == "Clientes":
-    st.header("👤 Clientes")
+    st.header("👤 Cadastro de Clientes")
 
     nome = st.text_input("Nome do cliente")
+    cpf = st.text_input("CPF (somente números ou com pontos)")
+
     if st.button("Cadastrar"):
-        if nome and nome not in clientes["cliente"].values:
-            clientes = clientes.append({"cliente": nome, "saldo": 0.0}, ignore_index=True)
+        cpf_limpo = re.sub(r"\D", "", cpf)
+
+        if not nome or not cpf:
+            st.error("Nome e CPF são obrigatórios")
+
+        elif not validar_cpf(cpf):
+            st.error("CPF inválido")
+
+        elif cpf_limpo in clientes["cpf"].astype(str).values:
+            st.error("CPF já cadastrado")
+
+        else:
+            clientes = clientes.append({
+                "cliente": nome,
+                "cpf": cpf_limpo,
+                "saldo": 0.0
+            }, ignore_index=True)
+
             save_csv(clientes, CLIENTES_FILE)
-            st.success("Cliente cadastrado")
+            st.success("Cliente cadastrado com sucesso")
 
     st.dataframe(clientes)
 
 # ======================
-# VENDA / GANHO CASHBACK
+# VENDA / GANHO
 # ======================
 if menu == "Venda / Cashback":
     st.header("💰 Registrar Venda")
 
-    cliente = st.selectbox("Cliente", clientes["cliente"])
+    cliente_sel = st.selectbox("Cliente", clientes["cliente"])
+    cliente = clientes[clientes["cliente"] == cliente_sel].iloc[0]
+
     valor = st.number_input("Valor do cashback", min_value=0.0)
     vendedor = st.text_input("Vendedor")
-    modelo = st.selectbox(
-        "Modelo",
-        ["Onix", "Tracker", "Spark EV", "Captiva EV"]
-    )
+    modelo = st.selectbox("Modelo", ["Onix", "Tracker", "Spark EV", "Captiva EV"])
 
     if st.button("Gerar Cashback"):
-        clientes.loc[clientes["cliente"] == cliente, "saldo"] += valor
+        clientes.loc[clientes["cpf"] == cliente["cpf"], "saldo"] += valor
+
         historico = historico.append({
             "data": datetime.now(),
-            "cliente": cliente,
+            "cliente": cliente["cliente"],
+            "cpf": cliente["cpf"],
             "tipo": "GANHO",
             "valor": valor,
             "motivo": f"Venda {modelo}",
@@ -114,19 +156,29 @@ if menu == "Venda / Cashback":
 if menu == "Usar Cashback":
     st.header("🟢 Usar Cashback")
 
-    cliente = st.selectbox("Cliente", clientes["cliente"])
-    saldo = clientes.loc[clientes["cliente"] == cliente, "saldo"].values[0]
-    st.info(f"Saldo disponível: R$ {saldo:.2f}")
+    cliente_sel = st.selectbox("Cliente", clientes["cliente"])
+    cliente = clientes[clientes["cliente"] == cliente_sel].iloc[0]
 
-    valor = st.number_input("Valor a usar", min_value=0.0, max_value=saldo)
+    st.info(f"Saldo disponível: R$ {cliente['saldo']:.2f}")
+
+    valor = st.number_input(
+        "Valor a usar",
+        min_value=0.0,
+        max_value=float(cliente["saldo"])
+    )
     motivo = st.text_input("Motivo do uso")
 
     if st.button("Usar Cashback"):
-        if valor > 0 and motivo:
-            clientes.loc[clientes["cliente"] == cliente, "saldo"] -= valor
+        if valor <= 0 or not motivo:
+            st.error("Informe valor e motivo")
+
+        else:
+            clientes.loc[clientes["cpf"] == cliente["cpf"], "saldo"] -= valor
+
             historico = historico.append({
                 "data": datetime.now(),
-                "cliente": cliente,
+                "cliente": cliente["cliente"],
+                "cpf": cliente["cpf"],
                 "tipo": "USO",
                 "valor": valor,
                 "motivo": motivo,
@@ -144,15 +196,19 @@ if menu == "Usar Cashback":
 if menu == "Estorno":
     st.header("🔄 Estorno")
 
-    cliente = st.selectbox("Cliente", clientes["cliente"])
+    cliente_sel = st.selectbox("Cliente", clientes["cliente"])
+    cliente = clientes[clientes["cliente"] == cliente_sel].iloc[0]
+
     valor = st.number_input("Valor do estorno", min_value=0.0)
     motivo = st.text_input("Motivo do estorno")
 
     if st.button("Estornar"):
-        clientes.loc[clientes["cliente"] == cliente, "saldo"] += valor
+        clientes.loc[clientes["cpf"] == cliente["cpf"], "saldo"] += valor
+
         historico = historico.append({
             "data": datetime.now(),
-            "cliente": cliente,
+            "cliente": cliente["cliente"],
+            "cpf": cliente["cpf"],
             "tipo": "ESTORNO",
             "valor": valor,
             "motivo": motivo,
