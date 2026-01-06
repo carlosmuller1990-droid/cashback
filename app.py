@@ -190,4 +190,4 @@ elif menu == "📄 Relatórios":
         st.download_button("Baixar Excel", buffer.getvalue(), "relatorio.xlsx")
 
 st.markdown("---")
-st.caption("Sistema Auto Nunes")
+st.caption("Sistema Auto Nunes") 
