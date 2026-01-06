@@ -1,260 +1,192 @@
 import streamlit as st
 import pandas as pd
 import hashlib
+from datetime import datetime, timedelta
 import os
-from datetime import date, timedelta
-from io import BytesIO
-import matplotlib.pyplot as plt
 
-# =============================
-# CONFIGURAÇÃO DA PÁGINA
-# =============================
-st.set_page_config(
-    page_title="Sistema de Vendas - Auto Nunes",
-    page_icon="🚗",
-    layout="wide"
-)
+# ================== CONFIG ==================
+st.set_page_config(page_title="Sistema de Cashback", layout="wide")
 
-# =============================
-# LOGIN CRIPTOGRAFADO
-# =============================
+ARQ_DADOS = "cashback.csv"
+ARQ_HIST = "historico.csv"
+
+LIMITE_POR_COMPRA = 500.0
+
 USUARIOS = {
-    "carlos": hashlib.sha256("1234".encode()).hexdigest(),
-    "vendedor": hashlib.sha256("1234".encode()).hexdigest()
+    "carlos": {
+        "senha": hashlib.sha256("1234".encode()).hexdigest(),
+        "perfil": "admin"
+    },
+    "vendedor": {
+        "senha": hashlib.sha256("1234".encode()).hexdigest(),
+        "perfil": "vendedor"
+    }
 }
 
-def autenticar(u, s):
-    return USUARIOS.get(u) == hashlib.sha256(s.encode()).hexdigest()
+# ================== FUNÇÕES ==================
+def salvar_csv(df, arq):
+    df.to_csv(arq, index=False)
 
-if "logado" not in st.session_state:
-    st.session_state.logado = False
-    st.session_state.usuario = ""
+def hash_senha(s):
+    return hashlib.sha256(s.encode()).hexdigest()
 
-if not st.session_state.logado:
+def carregar_dados():
+    if os.path.exists(ARQ_DADOS):
+        return pd.read_csv(ARQ_DADOS, parse_dates=["Data_Venda", "Data_Expiracao"])
+    return pd.DataFrame(columns=[
+        "Cliente", "CPF", "Veiculo", "Valor_Venda",
+        "Cashback", "Saldo_Cashback",
+        "Data_Venda", "Data_Expiracao"
+    ])
+
+def carregar_historico():
+    if os.path.exists(ARQ_HIST):
+        return pd.read_csv(ARQ_HIST)
+    return pd.DataFrame(columns=[
+        "Cliente", "CPF", "Tipo", "Valor",
+        "Vendedor", "CPF_Vendedor", "Motivo", "Data"
+    ])
+
+def registrar_historico(df, **dados):
+    df.loc[len(df)] = dados
+    salvar_csv(df, ARQ_HIST)
+
+# ================== LOGIN ==================
+if "usuario" not in st.session_state:
     st.title("🔐 Login")
+
     u = st.text_input("Usuário")
     s = st.text_input("Senha", type="password")
+
     if st.button("Entrar"):
-        if autenticar(u, s):
-            st.session_state.logado = True
+        if u in USUARIOS and hash_senha(s) == USUARIOS[u]["senha"]:
             st.session_state.usuario = u
+            st.session_state.perfil = USUARIOS[u]["perfil"]
             st.rerun()
         else:
             st.error("Usuário ou senha inválidos")
     st.stop()
 
-# =============================
-# ARQUIVOS
-# =============================
-ARQ_VENDAS = "backup-vendas-auto.csv"
-ARQ_HIST = "historico-cashback.csv"
+# ================== CARGA ==================
+df = carregar_dados()
+hist = carregar_historico()
 
-COL_VENDAS = [
-    "Nome","CPF","Veiculo","Valor_Venda",
-    "Percentual_Cashback","Valor_Cashback",
-    "Saldo_Cashback","Data_Venda","Data_Expiracao"
-]
+# ================== EXPIRAÇÃO AUTOMÁTICA ==================
+hoje = datetime.now()
+df.loc[df["Data_Expiracao"] < hoje, "Saldo_Cashback"] = 0
+salvar_csv(df, ARQ_DADOS)
 
-COL_HIST = [
-    "Nome_Cliente","CPF_Cliente",
-    "Valor","Tipo","Motivo",
-    "Data","Vendedor","CPF_Vendedor"
-]
+# ================== DASHBOARD ==================
+st.title("💳 Sistema de Cashback")
 
-if os.path.exists(ARQ_VENDAS):
-    df = pd.read_csv(ARQ_VENDAS, parse_dates=["Data_Venda","Data_Expiracao"])
-else:
-    df = pd.DataFrame(columns=COL_VENDAS)
-    df.to_csv(ARQ_VENDAS, index=False)
-
-if os.path.exists(ARQ_HIST):
-    hist = pd.read_csv(ARQ_HIST, parse_dates=["Data"])
-else:
-    hist = pd.DataFrame(columns=COL_HIST)
-    hist.to_csv(ARQ_HIST, index=False)
-
-# =============================
-# EXPIRAÇÃO AUTOMÁTICA DIÁRIA
-# =============================
-hoje = pd.Timestamp.today().normalize()
-expirados = df[
-    (df["Saldo_Cashback"] > 0) &
-    (df["Data_Expiracao"] < hoje)
-]
-
-if not expirados.empty:
-    df.loc[expirados.index, "Saldo_Cashback"] = 0
-    df.to_csv(ARQ_VENDAS, index=False)
-
-# =============================
 # ALERTA 7 DIAS
-# =============================
 alerta = df[
     (df["Saldo_Cashback"] > 0) &
-    (df["Data_Expiracao"] <= hoje + pd.Timedelta(days=7))
+    (df["Data_Expiracao"] <= hoje + timedelta(days=7))
 ]
-
 if not alerta.empty:
     st.warning("🔔 Existem cashbacks a vencer nos próximos 7 dias")
 
-# =============================
-# MENU
-# =============================
-st.sidebar.title("📌 Menu")
-menu = st.sidebar.radio(
-    "Selecione",
-    ["📊 Dashboard","➕ Nova Venda","🔍 Buscar Cliente","📄 Relatórios"]
-)
+# SALDO CONSOLIDADO
+saldo_cliente = df.groupby("Cliente")["Saldo_Cashback"].sum().reset_index()
 
-# =============================
-# DASHBOARD
-# =============================
-if menu == "📊 Dashboard":
-    st.header("📊 Dashboard")
+# RANKING VENDEDORES
+ranking = hist[hist["Tipo"] == "USO"]
+ranking = ranking.groupby("Vendedor")["Valor"].sum().reset_index()
 
-    c1,c2,c3 = st.columns(3)
-    c1.metric("Vendas", len(df))
-    c2.metric("Valor Vendido", f"R$ {df['Valor_Venda'].sum():,.2f}")
-    c3.metric("Cashback Ativo", f"R$ {df['Saldo_Cashback'].sum():,.2f}")
+col1, col2 = st.columns(2)
 
+with col1:
     st.subheader("📊 Saldo por Cliente")
-    saldo = df.groupby(["Nome","CPF"])["Saldo_Cashback"].sum().reset_index()
-    st.dataframe(saldo, use_container_width=True)
+    st.bar_chart(saldo_cliente.set_index("Cliente"))
 
-    st.subheader("🚗 Vendas por Veículo")
-    if not df.empty:
-        graf = df.groupby("Veiculo")["Valor_Venda"].sum()
-        fig, ax = plt.subplots()
-        ax.bar(graf.index, graf.values)
-        ax.set_ylabel("Valor (R$)")
-        ax.set_xlabel("Veículo")
-        st.pyplot(fig)
+with col2:
+    st.subheader("🏆 Ranking de Vendedores")
+    if not ranking.empty:
+        st.bar_chart(ranking.set_index("Vendedor"))
 
-    st.subheader("📊 Ranking de Vendedores")
-    ranking = hist[hist["Tipo"]=="USO"].groupby("Vendedor")["Valor"].sum().reset_index()
-    ranking = ranking.sort_values("Valor", ascending=False)
-    st.dataframe(ranking, use_container_width=True)
+# ================== PESQUISA CLIENTE ==================
+st.subheader("🔎 Pesquisar Cliente")
 
-# =============================
-# NOVA VENDA
-# =============================
-elif menu == "➕ Nova Venda":
-    st.header("➕ Nova Venda")
+busca = st.text_input("Nome ou CPF do Cliente")
 
-    with st.form("venda"):
-        nome = st.text_input("Nome *")
-        cpf = st.text_input("CPF *")
-        veiculo = st.selectbox(
-            "Veículo",
-            ["Onix","Onix Plus","Tracker","Spin","Montana","S10","Blazer"]
-        )
-        valor = st.number_input("Valor da Venda", min_value=0.0, step=1000.0)
-        perc = st.selectbox("Cashback (%)",[0,5,10,15,20])
-        if st.form_submit_button("Salvar"):
-            cashback = valor * (perc/100)
-            nova = {
-                "Nome":nome,"CPF":cpf,"Veiculo":veiculo,
-                "Valor_Venda":valor,
-                "Percentual_Cashback":perc,
-                "Valor_Cashback":cashback,
-                "Saldo_Cashback":cashback,
-                "Data_Venda":date.today(),
-                "Data_Expiracao":date.today()+timedelta(days=90)
-            }
-            df = pd.concat([df,pd.DataFrame([nova])])
-            df.to_csv(ARQ_VENDAS,index=False)
-            st.success("Venda registrada")
+resultado = df[
+    df["Cliente"].str.contains(busca, case=False, na=False) |
+    df["CPF"].astype(str).str.contains(busca, na=False)
+]
 
-# =============================
-# BUSCAR CLIENTE
-# =============================
-elif menu == "🔍 Buscar Cliente":
-    st.header("🔍 Buscar Cliente")
-    busca = st.text_input("Nome ou CPF")
+st.dataframe(resultado)
 
-    res = df[
-        df["Nome"].str.contains(busca,case=False,na=False) |
-        df["CPF"].str.contains(busca,case=False,na=False)
-    ]
+# ================== USAR CASHBACK ==================
+if not resultado.empty:
+    st.subheader("💸 Usar Cashback")
 
-    st.dataframe(res, use_container_width=True)
+    valor = st.number_input("Valor a usar", min_value=0.0)
 
-    if not res.empty:
-        saldo = res["Saldo_Cashback"].sum()
-        st.info(f"Saldo disponível: R$ {saldo:,.2f}")
+    vendedor = st.text_input("Nome do Vendedor")
+    cpf_vendedor = st.text_input("CPF do Vendedor")
 
-        valor = st.number_input("Valor a usar", min_value=0.0)
-        vendedor = st.text_input("Vendedor")
-        cpf_v = st.text_input("CPF Vendedor")
-
-        if st.button("Usar Cashback"):
-            if valor <= saldo and vendedor and cpf_v:
-                restante = valor
-                for idx in res.index:
-                    if restante <= 0: break
-                    disp = df.loc[idx,"Saldo_Cashback"]
-                    uso = min(disp, restante)
-                    df.loc[idx,"Saldo_Cashback"] -= uso
-                    restante -= uso
-
-                hist = pd.concat([hist,pd.DataFrame([{
-                    "Nome_Cliente":res.iloc[0]["Nome"],
-                    "CPF_Cliente":res.iloc[0]["CPF"],
-                    "Valor":valor,
-                    "Tipo":"USO",
-                    "Motivo":"",
-                    "Data":date.today(),
-                    "Vendedor":vendedor,
-                    "CPF_Vendedor":cpf_v
-                }])])
-
-                df.to_csv(ARQ_VENDAS,index=False)
-                hist.to_csv(ARQ_HIST,index=False)
-                st.success("Cashback utilizado")
+    if st.button("Confirmar Uso"):
+        if valor > LIMITE_POR_COMPRA:
+            st.error("Valor excede o limite por compra")
+        else:
+            idx = resultado.index[0]
+            if valor > df.loc[idx, "Saldo_Cashback"]:
+                st.error("Saldo insuficiente")
             else:
-                st.error("Erro nos dados")
+                df.loc[idx, "Saldo_Cashback"] -= valor
+                salvar_csv(df, ARQ_DADOS)
 
-        st.subheader("🔄 Estorno de Cashback")
-        valor_est = st.number_input("Valor do Estorno", min_value=0.0)
-        motivo = st.text_input("Motivo do Estorno")
+                registrar_historico(
+                    hist,
+                    Cliente=df.loc[idx, "Cliente"],
+                    CPF=df.loc[idx, "CPF"],
+                    Tipo="USO",
+                    Valor=valor,
+                    Vendedor=vendedor,
+                    CPF_Vendedor=cpf_vendedor,
+                    Motivo="",
+                    Data=datetime.now()
+                )
+                st.success("Cashback utilizado com sucesso")
+                st.rerun()
 
-        if st.button("Estornar"):
-            if valor_est > 0 and motivo:
-                df.loc[res.index[0],"Saldo_Cashback"] += valor_est
+# ================== ESTORNO ==================
+st.subheader("🔄 Estorno de Cashback")
 
-                hist = pd.concat([hist,pd.DataFrame([{
-                    "Nome_Cliente":res.iloc[0]["Nome"],
-                    "CPF_Cliente":res.iloc[0]["CPF"],
-                    "Valor":valor_est,
-                    "Tipo":"ESTORNO",
-                    "Motivo":motivo,
-                    "Data":date.today(),
-                    "Vendedor":st.session_state.usuario,
-                    "CPF_Vendedor":""
-                }])])
+motivo = st.text_input("Motivo do estorno")
+valor_estorno = st.number_input("Valor do estorno", min_value=0.0)
 
-                df.to_csv(ARQ_VENDAS,index=False)
-                hist.to_csv(ARQ_HIST,index=False)
-                st.success("Estorno realizado")
+if st.button("Estornar"):
+    if not resultado.empty:
+        idx = resultado.index[0]
+        df.loc[idx, "Saldo_Cashback"] += valor_estorno
+        salvar_csv(df, ARQ_DADOS)
 
-        st.subheader("🧾 Histórico")
-        st.dataframe(hist[hist["CPF_Cliente"]==res.iloc[0]["CPF"]], use_container_width=True)
+        registrar_historico(
+            hist,
+            Cliente=df.loc[idx, "Cliente"],
+            CPF=df.loc[idx, "CPF"],
+            Tipo="ESTORNO",
+            Valor=valor_estorno,
+            Vendedor=st.session_state.usuario,
+            CPF_Vendedor="",
+            Motivo=motivo,
+            Data=datetime.now()
+        )
+        st.success("Estorno realizado")
+        st.rerun()
 
-# =============================
-# RELATÓRIOS
-# =============================
-elif menu == "📄 Relatórios":
-    if st.session_state.usuario != "carlos":
-        st.warning("Acesso restrito")
-    else:
-        st.dataframe(df, use_container_width=True)
-        buf = BytesIO()
-        df.to_excel(buf,index=False)
-        st.download_button("⬇ Vendas", buf.getvalue(), "vendas.xlsx")
+# ================== HISTÓRICO ==================
+st.subheader("🧾 Histórico Completo")
+st.dataframe(hist)
 
-        st.dataframe(hist, use_container_width=True)
-        buf2 = BytesIO()
-        hist.to_excel(buf2,index=False)
-        st.download_button("⬇ Histórico", buf2.getvalue(), "historico.xlsx")
-
-st.caption("Sistema Auto Nunes | Carlos Jr")
+# ================== RELATÓRIO ==================
+if st.session_state.perfil == "admin":
+    st.subheader("⬇️ Exportar Relatórios")
+    st.download_button(
+        "Baixar Histórico CSV",
+        hist.to_csv(index=False),
+        "historico_cashback.csv",
+        "text/csv"
+    )
