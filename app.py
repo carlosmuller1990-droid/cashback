@@ -1,239 +1,210 @@
 import streamlit as st
 import pandas as pd
-import altair as alt
-from datetime import datetime, timedelta
+from datetime import date
 import os
-
-st.set_page_config(page_title="Sistema de Cashback", layout="wide")
-
-ARQUIVO = "dados_cashback.csv"
-
-COLUNAS = [
-    "Data",
-    "Vendedor",
-    "Cliente",
-    "CPF",
-    "Carro",
-    "Valor_Venda",
-    "Cashback_Gerado",
-    "Cashback_Usado",
-    "Saldo_Cashback",
-    "Tipo",
-    "Motivo"
-]
+from io import BytesIO
+import altair as alt
 
 # =============================
-# BASE DE DADOS
+# CONFIGURAÇÃO DA PÁGINA
 # =============================
-def criar_base():
-    if not os.path.exists(ARQUIVO):
-        pd.DataFrame(columns=COLUNAS).to_csv(ARQUIVO, index=False)
-
-def carregar():
-    criar_base()
-    df = pd.read_csv(ARQUIVO)
-    df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
-    return df.reindex(columns=COLUNAS)
-
-def salvar(df):
-    df.to_csv(ARQUIVO, index=False)
-
-# =============================
-# CPF
-# =============================
-def validar_cpf(cpf):
-    cpf = ''.join(filter(str.isdigit, cpf))
-    if len(cpf) != 11 or cpf == cpf[0] * 11:
-        return False
-
-    def calc_digito(cpf, peso):
-        soma = sum(int(d) * p for d, p in zip(cpf, peso))
-        resto = soma % 11
-        return '0' if resto < 2 else str(11 - resto)
-
-    d1 = calc_digito(cpf[:9], range(10, 1, -1))
-    d2 = calc_digito(cpf[:9] + d1, range(11, 1, -1))
-    return cpf[-2:] == d1 + d2
-
-# =============================
-# EXPIRAÇÃO
-# =============================
-def expirar_cashback(df):
-    limite = datetime.now() - timedelta(days=30)
-    mask = (df["Tipo"] == "GERADO") & (df["Data"] < limite)
-    df.loc[mask, "Saldo_Cashback"] = 0
-    return df
+st.set_page_config(
+    page_title="Sistema de Vendas - Auto Nunes",
+    page_icon="🚗",
+    layout="wide"
+)
 
 # =============================
 # LOGIN
 # =============================
-if "usuario" not in st.session_state:
-    st.session_state.usuario = None
+if "logado" not in st.session_state:
+    st.session_state.logado = False
     st.session_state.perfil = None
 
-if st.session_state.usuario is None:
+if not st.session_state.logado:
     st.title("🔐 Login")
-    u = st.text_input("Usuário")
-    s = st.text_input("Senha", type="password")
+
+    usuario = st.text_input("Usuário")
+    senha = st.text_input("Senha", type="password")
 
     if st.button("Entrar"):
-        if u == "carlos" and s == "admin":
-            st.session_state.usuario = "Carlos"
+        if usuario == "carlos" and senha == "1234":
+            st.session_state.logado = True
             st.session_state.perfil = "admin"
             st.rerun()
-        elif u == "vendedor" and s == "123":
-            st.session_state.usuario = "Vendedor"
+        elif usuario == "vendedor" and senha == "1234":
+            st.session_state.logado = True
             st.session_state.perfil = "vendedor"
             st.rerun()
         else:
-            st.error("Login inválido")
+            st.error("Usuário ou senha inválidos")
+
     st.stop()
 
 # =============================
-# APP
+# ARQUIVO LOCAL
 # =============================
-df = carregar()
-df = expirar_cashback(df)
-salvar(df)
-
-st.sidebar.success(f"Logado como: {st.session_state.usuario}")
-if st.sidebar.button("Sair"):
-    st.session_state.usuario = None
-    st.session_state.perfil = None
-    st.rerun()
+ARQUIVO_DADOS = "backup-vendas-auto.csv"
 
 # =============================
-# REGISTRAR VENDA
+# CARREGAMENTO SEGURO DO CSV
 # =============================
-st.header("🚗 Registrar Venda")
+if os.path.exists(ARQUIVO_DADOS):
+    df = pd.read_csv(ARQUIVO_DADOS, dtype={"CPF": str})
+else:
+    df = pd.DataFrame()
 
-with st.form("venda"):
-    vendedor = st.text_input("Vendedor", value=st.session_state.usuario)
-    cliente = st.text_input("Cliente")
-    cpf = st.text_input("CPF (obrigatório)")
+# Garante colunas obrigatórias
+colunas_necessarias = [
+    "Nome", "CPF", "Veiculo",
+    "Valor_Venda", "Percentual_Cashback",
+    "Valor_Cashback", "Data_Venda"
+]
 
-    carro = st.selectbox(
-        "Carro",
-        [
-            "Onix",
-            "Onix Plus",
-            "Tracker",
-            "Montana",
-            "Spark EV",
-            "Captiva EV",
-            "Equinox",
-            "Equinox EV"
+for col in colunas_necessarias:
+    if col not in df.columns:
+        df[col] = None
+
+df["Valor_Venda"] = pd.to_numeric(df["Valor_Venda"], errors="coerce").fillna(0)
+df["Valor_Cashback"] = pd.to_numeric(df["Valor_Cashback"], errors="coerce").fillna(0)
+df["Percentual_Cashback"] = pd.to_numeric(df["Percentual_Cashback"], errors="coerce").fillna(0)
+df["Data_Venda"] = pd.to_datetime(df["Data_Venda"], errors="coerce")
+
+# =============================
+# TÍTULO
+# =============================
+st.title("🚗 Sistema de Vendas - Auto Nunes")
+st.markdown("---")
+
+# =============================
+# MENU
+# =============================
+menu = st.sidebar.radio(
+    "📌 Menu",
+    ["📊 Dashboard de Vendas", "➕ Nova Venda", "🔍 Buscar Cliente", "📄 Relatórios"]
+)
+
+# =============================
+# DASHBOARD
+# =============================
+if menu == "📊 Dashboard de Vendas":
+    st.header("📊 Dashboard de Vendas")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total de Vendas", len(df))
+    c2.metric("Valor Total Vendido", f"R$ {df['Valor_Venda'].sum():,.2f}")
+    c3.metric("Cashback Concedido", f"R$ {df['Valor_Cashback'].sum():,.2f}")
+
+    st.markdown("---")
+    st.subheader("🚗 Quantidade de Carros Vendidos")
+
+    if not df.empty:
+        carros = df.groupby("Veiculo").size().reset_index(name="Qtd")
+
+        grafico = alt.Chart(carros).mark_bar().encode(
+            x=alt.X("Veiculo:N", title="Veículo"),
+            y=alt.Y("Qtd:Q", title="Quantidade"),
+            color=alt.Color("Veiculo:N", legend=None),
+            tooltip=["Veiculo", "Qtd"]
+        ).properties(height=400)
+
+        st.altair_chart(grafico, use_container_width=True)
+        st.dataframe(carros, use_container_width=True)
+    else:
+        st.info("Nenhuma venda registrada.")
+
+# =============================
+# NOVA VENDA
+# =============================
+elif menu == "➕ Nova Venda":
+    st.header("➕ Registrar Nova Venda")
+
+    with st.form("form_venda"):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            nome = st.text_input("Nome do Cliente *")
+            cpf = st.text_input("CPF *")
+            veiculo = st.selectbox(
+                "Veículo *",
+                [
+                    "Onix", "Onix Plus", "Tracker", "Montana",
+                    "Spark EV", "Captiva EV",
+                    "Equinox", "Equinox EV"
+                ]
+            )
+            data_venda = st.date_input("Data da Venda", value=date.today())
+
+        with col2:
+            valor_venda = st.number_input("Valor da Venda (R$)", min_value=0.0, step=1000.0)
+            percentual = st.selectbox("Percentual de Cashback", [0, 5, 10, 15, 20])
+
+        valor_cashback = valor_venda * (percentual / 100)
+
+        st.markdown("### 📋 Resumo")
+        r1, r2, r3 = st.columns(3)
+        r1.metric("Valor da Venda", f"R$ {valor_venda:,.2f}")
+        r2.metric("Cashback", f"R$ {valor_cashback:,.2f}")
+        r3.metric("Percentual", f"{percentual}%")
+
+        if st.form_submit_button("Salvar Venda"):
+            if nome and cpf and valor_venda > 0:
+                nova = pd.DataFrame([{
+                    "Nome": nome,
+                    "CPF": cpf,
+                    "Veiculo": veiculo,
+                    "Valor_Venda": valor_venda,
+                    "Percentual_Cashback": percentual,
+                    "Valor_Cashback": valor_cashback,
+                    "Data_Venda": data_venda
+                }])
+
+                df = pd.concat([df, nova], ignore_index=True)
+                df.to_csv(ARQUIVO_DADOS, index=False)
+                st.success("Venda registrada com sucesso!")
+            else:
+                st.error("Preencha todos os campos obrigatórios.")
+
+# =============================
+# BUSCAR CLIENTE
+# =============================
+elif menu == "🔍 Buscar Cliente":
+    st.header("🔍 Buscar Cliente")
+    busca = st.text_input("Buscar por Nome ou CPF")
+
+    if busca:
+        resultado = df[
+            df["Nome"].str.contains(busca, case=False, na=False) |
+            df["CPF"].str.contains(busca, case=False, na=False)
         ]
-    )
+    else:
+        resultado = df
 
-    valor = st.number_input("Valor da Venda", min_value=0.0, step=100.0)
-    cashback = st.number_input("Cashback Gerado", min_value=0.0, step=10.0)
-
-    if st.form_submit_button("Salvar Venda"):
-        if not validar_cpf(cpf):
-            st.error("CPF inválido")
-        else:
-            novo = {
-                "Data": datetime.now(),
-                "Vendedor": vendedor,
-                "Cliente": cliente,
-                "CPF": cpf,
-                "Carro": carro,
-                "Valor_Venda": valor,
-                "Cashback_Gerado": cashback,
-                "Cashback_Usado": 0,
-                "Saldo_Cashback": cashback,
-                "Tipo": "GERADO",
-                "Motivo": ""
-            }
-            df = pd.concat([df, pd.DataFrame([novo])])
-            salvar(df)
-            st.success("Venda registrada com sucesso")
+    st.dataframe(resultado, use_container_width=True)
 
 # =============================
-# USAR CASHBACK
+# RELATÓRIOS (SÓ ADMIN)
 # =============================
-st.header("💳 Usar Cashback")
+elif menu == "📄 Relatórios":
+    if st.session_state.perfil != "admin":
+        st.warning("Acesso restrito ao administrador.")
+    else:
+        st.header("📄 Relatórios")
+        st.dataframe(df, use_container_width=True)
 
-cpf_uso = st.text_input("CPF do Cliente")
-cliente_df = df[df["CPF"] == cpf_uso]
-saldo = cliente_df["Saldo_Cashback"].sum()
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False)
 
-st.info(f"Saldo disponível: R$ {saldo:,.2f}")
-
-valor_uso = st.number_input("Valor a usar", min_value=0.0, max_value=float(saldo))
-motivo_uso = st.text_input("Motivo do uso")
-
-if st.button("Usar Cashback"):
-    if valor_uso > 0 and motivo_uso:
-        uso = {
-            "Data": datetime.now(),
-            "Vendedor": st.session_state.usuario,
-            "Cliente": cliente_df.iloc[0]["Cliente"] if not cliente_df.empty else "",
-            "CPF": cpf_uso,
-            "Carro": "",
-            "Valor_Venda": 0,
-            "Cashback_Gerado": 0,
-            "Cashback_Usado": valor_uso,
-            "Saldo_Cashback": saldo - valor_uso,
-            "Tipo": "USO",
-            "Motivo": motivo_uso
-        }
-        df = pd.concat([df, pd.DataFrame([uso])])
-        salvar(df)
-        st.success("Cashback utilizado")
+        st.download_button(
+            "⬇ Baixar Relatório Excel",
+            buffer.getvalue(),
+            file_name="relatorio_vendas.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 # =============================
-# INDICADORES
+# RODAPÉ
 # =============================
-st.header("📊 Indicadores")
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Total de Vendas", len(df[df["Tipo"] == "GERADO"]))
-c2.metric("Valor Vendido", f"R$ {df['Valor_Venda'].sum():,.2f}")
-c3.metric("Cashback Usado", f"R$ {df['Cashback_Usado'].sum():,.2f}")
-
-# =============================
-# GRÁFICO
-# =============================
-st.header("📈 Vendas por Modelo")
-
-graf_df = (
-    df[df["Tipo"] == "GERADO"]
-    .groupby("Carro", as_index=False)["Valor_Venda"]
-    .sum()
-)
-
-chart = (
-    alt.Chart(graf_df)
-    .mark_bar()
-    .encode(
-        x=alt.X("Carro:N", sort="-y"),
-        y="Valor_Venda:Q",
-        color="Carro:N",
-        tooltip=["Carro", "Valor_Venda"]
-    )
-    .properties(height=400)
-)
-
-st.altair_chart(chart, use_container_width=True)
-
-# =============================
-# RANKING
-# =============================
-st.header("🏆 Ranking de Vendedores")
-
-ranking = (
-    df[df["Tipo"] == "GERADO"]
-    .groupby("Vendedor")["Valor_Venda"]
-    .sum()
-    .sort_values(ascending=False)
-)
-
-st.dataframe(ranking)
-
-# =============================
-# HISTÓRICO
-# =============================
-st.header("📜 Histórico Completo")
-st.dataframe(df.sort_values("Data", ascending=False))
+st.markdown("---")
+st.caption("Sistema desenvolvido por Carlos Jr - Supervisor BDC")
